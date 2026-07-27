@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run tests
+        run: pytest tests/ -v --cov=agent --cov=api --cov=core --cov-report=xml
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install lint tools
+        run: pip install black ruff mypy
+      - name: Black check
+        run: black --check .
+      - name: Ruff check
+        run: ruff check .
+      - name: MyPy check
+        run: mypy agent/ api/ core/ --ignore-missing-imports
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t lumu-agent:latest .
+      - name: Test Docker healthcheck
+        run: |
+          docker run -d --name test-agent -p 8000:8000 lumu-agent:latest
+          sleep 10
+          curl -f http://localhost:8000/health || exit 1
+          docker stop test-agent

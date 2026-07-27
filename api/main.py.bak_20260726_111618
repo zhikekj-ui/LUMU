@@ -1,0 +1,1053 @@
+import time
+import os
+from starlette.middleware.base import BaseHTTPMiddleware
+from slowapi.errors import RateLimitExceeded
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from middleware.rate_limit import limiter, rate_limit_exceeded_handler
+from core.logging_config import configure_logging, get_logger
+
+"""FastAPI application — API routes + static file serving."""
+import json
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Header, Depends, Request, UploadFile, File
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from agent.core import Agent
+from tools.registry import ToolRegistry
+from providers.registry import discover_providers
+from plugins.loader import PluginLoader
+from mcp.bridge import MCPBridge
+from scheduler.scheduler import scheduler
+import config
+from core.user_config import (
+    load_config, save_config, get_provider_key, set_provider_key,
+    get_tts_config, set_tts_config, get_stt_config,
+    get_model_preference, set_model_preference,
+    get_system_prompt, set_system_prompt,
+    get_embedding_config, set_embedding_config,
+    get_provider_override, set_provider_override,
+)
+
+# --- Bootstrap ---
+discover_providers()
+
+tool_registry = ToolRegistry()
+tool_registry.discover()
+
+# Load plugins
+plugin_loader = PluginLoader()
+plugin_loader.discover()
+plugin_loader.register_tools(tool_registry)
+
+# MCP bridge
+mcp_bridge = MCPBridge()
+
+# Load saved model preference (overrides .env defaults)
+_saved_pref = get_model_preference()
+_init_provider = _saved_pref.get("provider", config.DEFAULT_PROVIDER)
+_init_model = _saved_pref.get("model", config.DEFAULT_MODEL)
+
+agent = Agent(
+    provider_name=_init_provider,
+    model=_init_model,
+    tool_registry=tool_registry,
+)
+
+# Wire scheduler to agent
+scheduler.set_agent(agent)
+
+
+# --- Lifespan ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: initialize logging
+    configure_logging(log_level="INFO", json_format=False)
+    logger = get_logger("lifespan")
+    logger.info("Agent Framework starting up")
+    # Startup: connect MCP servers
+    await mcp_bridge.connect_all(tool_registry)
+    # Start scheduler
+    await scheduler.start()
+    # Start channels
+    try:
+        from channels.router import channel_router
+        await channel_router.start_all(agent)
+    except Exception as e:
+        print(f"[channels] Startup error: {e}")
+    # Bootstrap super admin from env (no-op if unset/already exists)
+    try:
+        await ensure_bootstrap_admin()
+    except Exception as e:
+        print(f"[auth] bootstrap admin error: {e}")
+    yield
+    # Shutdown: stop scheduler + disconnect MCP + stop channels
+    await scheduler.stop()
+    await mcp_bridge.disconnect_all()
+    try:
+        from channels.router import channel_router
+        await channel_router.stop_all()
+    except Exception:
+        pass
+
+
+from routes.auth import router as auth_router
+from routes.admin import router as admin_router
+from routes.auth import ensure_bootstrap_admin
+app = FastAPI(title="Agent Framework", version="0.5.0", lifespan=lifespan)
+app.state.limiter = limiter
+app.include_router(auth_router)
+app.include_router(admin_router)
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- Auth middleware: global Bearer token gate (off when AUTH_DISABLED=true) ---
+AUTH_DISABLED = os.getenv("AUTH_DISABLED", "").lower() in ("1", "true", "yes", "on")
+_PUBLIC_PATHS = {
+    "/", "/health", "/metrics", "/api/health",
+    "/api/auth/login", "/api/auth/refresh", "/api/auth/register",
+    "/docs", "/redoc", "/openapi.json", "/favicon.ico",
+}
+_PUBLIC_PREFIXES = ("/static", "/assets", "/audio")
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if AUTH_DISABLED:
+            return await call_next(request)
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        path = request.url.path
+        if path in _PUBLIC_PATHS or path.startswith(_PUBLIC_PREFIXES):
+            return await call_next(request)
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            return JSONResponse(status_code=401, content={"detail": "未授权：请先登录"})
+        from auth.jwt_handler import verify_token
+        payload = verify_token(auth[7:])
+        if not payload or payload.get("type") != "access":
+            return JSONResponse(status_code=401, content={"detail": "登录已过期，请重新登录"})
+        return await call_next(request)
+
+app.add_middleware(AuthMiddleware)
+
+# Let plugins register API routes
+plugin_loader.register_routes(app)
+
+STATIC_DIR = Path(__file__).parent / "static"
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "provider": config.DEFAULT_PROVIDER,
+        "model": config.DEFAULT_MODEL,
+        "tools_loaded": len(getattr(tool_registry, "_tools", {})),
+    }
+
+
+@app.get("/metrics")
+async def metrics():
+    from fastapi import Response
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# --- Auth ---
+logger_auth = get_logger("auth")
+
+async def verify_api_key(authorization: str = Header(default="")):
+    """Open source mode - auth disabled, always pass."""
+    return None  # No auth required
+
+    # --- Original auth code disabled below ---
+    if not config.API_KEY and not authorization.startswith("Bearer "):
+        return
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+    token = authorization[7:]
+    # Legacy API key check
+    if config.API_KEY and token == config.API_KEY:
+        return
+    # Try JWT verification (from auth routes)
+    try:
+        from auth.jwt_handler import verify_token
+        payload = verify_token(token)
+        if payload:
+            return
+    except Exception:
+        pass
+    # If API_KEY is configured and neither matched, reject
+    if config.API_KEY:
+        logger_auth.warning("invalid_api_key_attempt", token_prefix=token[:8] if token else None)
+        raise HTTPException(status_code=403, detail="Invalid API key or token")
+
+
+# --- Request models ---
+class ChatRequest(BaseModel):
+    message: str
+    session_id: str | None = None
+    images: list[str] | None = None
+    voice_mode: bool = False  # 语音模式：跳过上下文分析/RAG/规划以降低延迟
+    attachments: list[str] | None = None  # 聊天附件 file_id 列表（上传后由后端注入上下文）
+
+
+class MemoryRequest(BaseModel):
+    key: str
+    content: str
+    category: str = "general"
+
+
+# --- Routes ---
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    html = (STATIC_DIR / "index.html").read_text()
+    return HTMLResponse(
+        content=html,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@limiter.limit("10/minute")
+@app.post("/api/chat")
+async def chat(req: ChatRequest, request: Request):
+    try:
+        message = _inject_attachments(req.message, req.attachments)
+        result = await agent.chat(message, req.session_id, images=req.images, voice_mode=getattr(req, 'voice_mode', False))
+        return JSONResponse(result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@limiter.limit("20/minute")
+@app.post("/api/chat/stream")
+async def chat_stream(req: ChatRequest, request: Request):
+    """SSE streaming endpoint — yields tokens as they arrive."""
+    message = _inject_attachments(req.message, req.attachments)
+
+    async def event_generator():
+        try:
+            async for event in agent.stream_chat(message, req.session_id, images=req.images, voice_mode=getattr(req, 'voice_mode', False)):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# --- Sessions ---
+@app.post("/api/sessions")
+async def create_session():
+    """Create a new empty session using proper Session object."""
+    session = agent.get_or_create_session()
+    return {"id": session.id, "messages": [], "preview": "", "message_count": 0}
+
+
+@app.get("/api/sessions")
+async def list_sessions():
+    """List all sessions with preview text. Handles both Session objects and dicts."""
+    result = []
+    for s in agent._sessions.values():
+        # Support both Session objects and dicts for backward compatibility
+        if hasattr(s, 'messages'):
+            messages = s.messages
+            sid = s.id
+        elif isinstance(s, dict):
+            messages = s.get("messages", [])
+            sid = s.get("id", "")
+        else:
+            continue
+        preview = ""
+        for m in messages:
+            if isinstance(m, dict) and m.get("role") == "user":
+                preview = m.get("content", "")[:40]
+                break
+        result.append({
+            "id": sid,
+            "preview": preview,
+            "message_count": len(messages),
+        })
+    return result
+
+
+@app.get("/api/sessions/{session_id}")
+async def get_session(session_id: str):
+    """Get full message history for a session."""
+    session = agent.get_or_create_session(session_id)
+    # Handle both Session objects and dicts
+    if hasattr(session, 'messages'):
+        return {
+            "id": session.id,
+            "messages": session.messages,
+        }
+    elif isinstance(session, dict):
+        return {
+            "id": session.get("id", session_id),
+            "messages": session.get("messages", []),
+        }
+    return {"id": session_id, "messages": []}
+
+
+@app.delete("/api/sessions/{session_id}")
+async def clear_session(session_id: str):
+    """Delete a session — requires auth."""
+    agent.clear_session(session_id)
+    return {"ok": True}
+
+
+# --- Memory ---
+@app.get("/api/memory")
+async def list_memories(category: str = ""):
+    """List all memories, optionally filtered by category."""
+    return agent.memory.list_all(category if category else None)
+
+
+@app.post("/api/memory")
+async def save_memory(req: MemoryRequest):
+    """Save a new memory."""
+    agent.memory.save(req.key, req.content, req.category)
+    return {"ok": True, "key": req.key}
+
+
+@app.delete("/api/memory/{key}")
+async def delete_memory(key: str):
+    """Delete a memory by key."""
+    agent.memory.delete(key)
+    return {"ok": True, "key": key}
+
+
+@app.get("/api/memory/search")
+async def search_memories(q: str = "", limit: int = 5):
+    """Search memories by keyword."""
+    if not q:
+        return []
+    return agent.memory.search(q, limit)
+
+
+# --- Skills ---
+class SkillRequest(BaseModel):
+    name: str
+    description: str
+    content: str
+    tags: str = ""
+
+
+@app.get("/api/skills")
+async def list_skills(tag: str = ""):
+    """List all saved skills."""
+    return agent.skills.list_all(tag if tag else "")
+
+
+@app.get("/api/skills/{skill_name}")
+async def get_skill_api(skill_name: str):
+    """Get full details of a skill."""
+    skill = agent.skills.get(skill_name)
+    if not skill:
+        raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+    return skill
+
+
+@app.post("/api/skills")
+async def save_skill_api(req: SkillRequest):
+    """Save or update a skill."""
+    is_new = agent.skills.save(req.name, req.description, req.content, req.tags)
+    return {"ok": True, "name": req.name, "created": is_new}
+
+
+@app.delete("/api/skills/{skill_name}")
+async def delete_skill_api(skill_name: str):
+    """Delete a skill."""
+    if agent.skills.delete(skill_name):
+        return {"ok": True, "name": skill_name}
+    raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+
+
+@app.get("/api/skills/search")
+async def search_skills(q: str = "", limit: int = 5):
+    """Search skills by keyword."""
+    if not q:
+        return []
+    return agent.skills.search(q, limit)
+
+
+# --- Cron Jobs ---
+@app.get("/api/cron")
+async def list_cron_jobs():
+    """List all scheduled cron jobs."""
+    return scheduler.list_jobs()
+
+
+@app.get("/api/cron/logs")
+async def cron_run_logs(job_id: str = "", limit: int = 20):
+    """Get cron job execution logs."""
+    return scheduler.get_run_logs(job_id, limit)
+
+
+@app.delete("/api/cron/{job_id}")
+async def delete_cron_job(job_id: str):
+    """Delete a cron job."""
+    if scheduler.delete_job(job_id):
+        return {"ok": True}
+    raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+
+
+# --- Channels ---
+class WebhookMessage(BaseModel):
+    text: str
+    user_id: str = "webhook_user"
+    chat_id: str = "default"
+    metadata: dict = {}
+
+
+@app.post("/api/webhook/{channel_name}")
+async def webhook_message(channel_name: str, msg: WebhookMessage):
+    """Receive a message via webhook channel."""
+    try:
+        from channels.router import channel_router
+        result = await channel_router.route(
+            channel_name=channel_name,
+            chat_id=msg.chat_id,
+            user_id=msg.user_id,
+            text=msg.text,
+            metadata=msg.metadata,
+        )
+        return {"ok": True, "reply": result}
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Channels not available")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- Health ---
+@app.get("/api/health")
+async def health():
+    data = {
+        "status": "ok",
+        "model": agent.model,
+        "provider": agent.provider_name,
+        "tools": len(tool_registry.list_tools()),
+        "toolsets": list(tool_registry.list_toolsets().keys()),
+        "sessions": len(agent._sessions),
+        "memories": len(agent.memory.list_all()),
+        "skills": len(agent.skills.list_all()),
+        "plugins": list(plugin_loader.plugins.keys()),
+        "mcp_servers": len(mcp_bridge.get_server_info()),
+        "cron_jobs": len(scheduler.list_jobs()),
+    }
+    try:
+        from channels.router import channel_router
+        data["channels"] = [c["name"] for c in channel_router.get_status() if c.get("enabled")]
+    except Exception:
+        data["channels"] = []
+    return data
+
+
+# Mount static files last
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
+
+# Mount audio output directory for TTS playback
+_audio_dir = STATIC_DIR.parent.parent / "data" / "audio"
+if not _audio_dir.exists():
+    _audio_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/audio", StaticFiles(directory=str(_audio_dir)), name="audio")
+
+
+
+# --- User Config (Provider API Keys + TTS/STT) ---
+from providers.registry import list_providers
+
+
+class ProviderKeyRequest(BaseModel):
+    api_key: str
+
+
+class TTSConfigRequest(BaseModel):
+    provider: str | None = None
+    mimo_api_key: str | None = None
+
+
+class ModelSwitchRequest(BaseModel):
+    provider: str
+    model: str
+
+
+@app.get("/api/config")
+async def get_config():
+    """Get full user configuration (keys masked)."""
+    cfg = load_config()
+    # Mask API keys for security
+    for pname, pcfg in cfg.get("providers", {}).items():
+        key = pcfg.get("api_key", "")
+        if key and len(key) > 8:
+            pcfg["api_key"] = key[:4] + "****" + key[-4:]
+    tts = cfg.get("tts", {})
+    if tts.get("mimo_api_key") and len(tts["mimo_api_key"]) > 8:
+        tts["mimo_api_key"] = tts["mimo_api_key"][:4] + "****"
+    return cfg
+
+
+@app.get("/api/config/providers")
+async def get_provider_configs():
+    """List all providers with their configuration status."""
+    providers = list_providers()
+    result = []
+    for p in providers:
+        key = get_provider_key(p.name)
+        has_key = bool(key and len(key) > 4)
+        result.append({
+            "name": p.name,
+            "display_name": p.display_name,
+            "base_url": p.base_url,
+            "base_url_override": get_provider_override(p.name).get("base_url", ""),
+            "models": p.models,
+            "context_window": p.context_window,
+            "supports_vision": p.supports_vision,
+            "api_key_configured": has_key,
+            "api_key_preview": (key[:4] + "****" + key[-4:]) if has_key and len(key) > 8 else ("已配置" if has_key else ""),
+        })
+    return {"providers": result, "total": len(result), "system_prompt": get_system_prompt()}
+
+
+class ProviderOverrideRequest(BaseModel):
+    provider: str
+    base_url: str = ""
+
+
+@app.post("/api/config/provider-override")
+async def set_provider_override_api(req: ProviderOverrideRequest):
+    """Set/clear a custom endpoint (base_url) for a provider.
+
+    Applies live (no restart needed) and persists to user_config.json.
+    Empty ``base_url`` clears the override and reverts to the provider default.
+    """
+    try:
+        ok = set_provider_override(req.provider, {"base_url": req.base_url})
+        if not ok:
+            raise HTTPException(status_code=500, detail="保存失败")
+        return {
+            "ok": True,
+            "provider": req.provider,
+            "base_url": get_provider_override(req.provider).get("base_url", ""),
+            "message": (f"已为 {req.provider} 设置自定义 Endpoint" if req.base_url.strip()
+                        else f"已清除 {req.provider} 的自定义 Endpoint"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/config/provider/{provider_name}/key")
+async def set_provider_api_key(provider_name: str, req: ProviderKeyRequest):
+    """Set API key for a provider."""
+    if not req.api_key or len(req.api_key.strip()) < 4:
+        raise HTTPException(status_code=400, detail="API key too short")
+    set_provider_key(provider_name, req.api_key.strip())
+    return {"ok": True, "provider": provider_name, "message": f"{provider_name} API Key 已保存"}
+
+
+@app.get("/api/config/tts")
+async def get_tts_configuration():
+    """Get TTS configuration."""
+    tts = get_tts_config()
+    if tts.get("mimo_api_key") and len(tts["mimo_api_key"]) > 8:
+        tts["mimo_api_key"] = tts["mimo_api_key"][:4] + "****"
+    return tts
+
+
+@app.post("/api/config/tts")
+async def update_tts_configuration(req: TTSConfigRequest):
+    """Update TTS configuration."""
+    set_tts_config(provider=req.provider, mimo_api_key=req.mimo_api_key)
+    return {"ok": True, "message": "TTS 配置已更新"}
+
+
+@app.get("/api/config/stt")
+async def get_stt_configuration():
+    """Get STT configuration."""
+    return get_stt_config()
+
+# ===== Voice API: STT & TTS direct endpoints =====
+
+@app.post("/api/voice/transcribe")
+async def transcribe_audio(file: UploadFile = File(...)):
+    """Transcribe uploaded audio file to text using Whisper STT."""
+    import os
+    import tempfile
+    import uuid
+
+    # Read uploaded audio
+    audio_bytes = await file.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio file")
+
+    # Save to temp file
+    suffix = os.path.splitext(file.filename or "audio.webm")[1] or ".webm"
+    tmp_dir = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "audio")
+    os.makedirs(tmp_dir, exist_ok=True)
+    tmp_filename = f"stt_{uuid.uuid4().hex[:8]}{suffix}"
+    tmp_path = os.path.join(tmp_dir, tmp_filename)
+
+    with open(tmp_path, "wb") as f:
+        f.write(audio_bytes)
+
+    # Call stt_transcribe tool handler directly
+    try:
+        from tools.tts_stt import handle_stt_transcribe
+        result = handle_stt_transcribe(
+            audio_file=tmp_path,
+            language="zh",
+            provider="whisper",
+        )
+
+        # Clean up temp file
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+
+        return {
+            "success": True,
+            "text": result.get("text", ""),
+            "provider": result.get("provider", "whisper"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Clean up on error
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"STT failed: {str(e)}")
+
+
+@app.post("/api/voice/tts")
+async def synthesize_speech(req: dict):
+    """Synthesize text to speech audio and return file URL."""
+    from tools.tts_stt import handle_tts_synthesize
+
+    text = req.get("text", "")
+    voice = req.get("voice", "mimo_default")
+    style = req.get("style", "")
+    # 默认使用 auto 模式：先尝试 MiMo TTS，失败自动回退到 Edge TTS
+    provider = req.get("provider", "auto")
+    rate = req.get("rate", "+8%")
+    pitch = req.get("pitch", "+2Hz")
+
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Text is empty")
+
+    result = handle_tts_synthesize(
+        text=text, voice=voice, provider=provider,
+        style=style, rate=rate, pitch=pitch
+    )
+
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    # Return audio file URL (served from /static)
+    filename = result.get("filename", "")
+    return {
+        "success": True,
+        "audio_url": f"/audio/{filename}" if filename else None,
+        "filename": filename,
+        "provider": result.get("provider", "edge"),
+        "voice": result.get("voice", ""),
+    }
+
+
+
+
+@app.post("/api/config/model")
+async def switch_model(req: ModelSwitchRequest):
+    """Switch the active model (and optionally provider)."""
+    from providers.registry import get as get_provider
+
+    provider = get_provider(req.provider)
+    if not provider:
+        raise HTTPException(status_code=404, detail=f"Provider '{req.provider}' not found")
+    if not req.model:
+        raise HTTPException(status_code=400, detail="model 不能为空")
+    # 允许任意模型名：base_url 覆盖后用户可使用任意兼容 OpenAI 的模型
+
+    # Update agent
+    if agent.provider_name != req.provider:
+        agent.provider_name = req.provider
+        agent.provider = provider
+        # Rebuild context engine for new provider's context window
+        from agent.context import ContextEngine
+        agent.context = ContextEngine(context_window=provider.context_window)
+    agent.model = req.model
+
+    # Persist model preference
+    set_model_preference(req.provider, req.model)
+
+    return {
+        "ok": True,
+        "provider": req.provider,
+        "model": req.model,
+        "message": f"已切换到 {provider.display_name} / {req.model}"
+    }
+
+
+class SystemPromptRequest(BaseModel):
+    system_prompt: str
+
+
+@app.post("/api/config/system-prompt")
+async def set_system_prompt_api(req: SystemPromptRequest):
+    """Save custom system prompt."""
+    try:
+        set_system_prompt(req.system_prompt)
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- Embedding Config ---
+class EmbeddingConfigRequest(BaseModel):
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""
+
+
+@app.get("/api/config/embedding")
+async def get_embedding_config_api():
+    """Get embedding API configuration."""
+    cfg = get_embedding_config()
+    # Mask API key for security
+    if cfg.get("api_key") and len(cfg["api_key"]) > 8:
+        cfg["api_key_masked"] = cfg["api_key"][:4] + "****" + cfg["api_key"][-4:]
+        cfg["api_key"] = True
+    else:
+        cfg["api_key_masked"] = ""
+        cfg["api_key"] = bool(cfg.get("api_key"))
+    return cfg
+
+
+@app.post("/api/config/embedding")
+async def set_embedding_config_api(req: EmbeddingConfigRequest):
+    """Save embedding API configuration."""
+    try:
+        # Don't overwrite existing key with empty string
+        existing = get_embedding_config()
+        api_key = req.api_key if req.api_key.strip() else existing.get("api_key", "")
+        set_embedding_config(
+            api_key=api_key,
+            base_url=req.base_url.strip(),
+            model=req.model.strip(),
+        )
+        cfg = get_embedding_config()
+        if cfg.get("api_key") and len(cfg["api_key"]) > 8:
+            cfg["api_key_masked"] = cfg["api_key"][:4] + "****" + cfg["api_key"][-4:]
+            cfg["api_key"] = True
+        else:
+            cfg["api_key_masked"] = ""
+            cfg["api_key"] = bool(cfg.get("api_key"))
+        return cfg
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/kb/reembed")
+async def reembed_knowledge():
+    """Re-embed all knowledge entries using current embedding method."""
+    try:
+        from knowledge.base import KnowledgeBase
+        import os
+        kb_path = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+        kb = KnowledgeBase(db_path=kb_path)
+        result = kb.reembed_all()
+        from knowledge.embedding import get_embedding_info
+        result["embedding_info"] = get_embedding_info()
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- Knowledge Base helpers ---
+def _kb_db_path():
+    import os
+    return os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+
+
+def _get_kb():
+    from knowledge.base import KnowledgeBase
+    return KnowledgeBase(db_path=_kb_db_path())
+
+
+def _human_size(n):
+    if not n:
+        return "0 B"
+    try:
+        n = int(n)
+    except Exception:
+        return str(n)
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(n)
+    for u in units:
+        if size < 1024 or u == units[-1]:
+            return f"{size:.1f} {u}" if u != "B" else f"{int(size)} {u}"
+        size /= 1024
+    return f"{size:.1f} MB"
+
+
+def _extract_text(path):
+    """Extract text from a file by extension. Returns (text, error_or_None)."""
+    import os
+    ext = os.path.splitext(path)[1].lower()
+    text_exts = {
+        '.txt', '.md', '.markdown', '.csv', '.json', '.log', '.py', '.js', '.ts',
+        '.java', '.c', '.cpp', '.h', '.hpp', '.go', '.rs', '.rb', '.php', '.sql',
+        '.yaml', '.yml', '.toml', '.ini', '.cfg', '.html', '.htm', '.xml', '.rst',
+        '.tex', '.sh', '.bash', '.ps1', '.r', '.scala', '.kt', '.swift', '.dart',
+        '.text', '.txt',
+    }
+    try:
+        if ext in text_exts:
+            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                return f.read(), None
+        if ext == '.pdf':
+            try:
+                import pdfplumber
+                with pdfplumber.open(path) as pdf:
+                    return "\n".join((p.extract_text() or "") for p in pdf.pages), None
+            except ImportError:
+                try:
+                    from pypdf import PdfReader
+                    r = PdfReader(path)
+                    return "\n".join((pg.extract_text() or "") for pg in r.pages), None
+                except ImportError:
+                    return None, "PDF 解析需要 pdfplumber 或 pypdf 库（pip install pdfplumber）"
+        if ext in ('.docx', '.doc'):
+            try:
+                import docx
+                d = docx.Document(path)
+                return "\n".join((p.text or "") for p in d.paragraphs), None
+            except ImportError:
+                return None, "DOCX 解析需要 python-docx 库（pip install python-docx）"
+        # 兜底：尝试按文本读取
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            return f.read(), None
+    except Exception as e:
+        return None, str(e)
+
+
+def _chunk_text(text, size=800, overlap=80):
+    if not text:
+        return []
+    chunks = []
+    start = 0
+    step = max(1, size - overlap)
+    n = len(text)
+    while start < n:
+        seg = text[start:start + size].strip()
+        if seg:
+            chunks.append(seg)
+        start += step
+    return chunks
+
+
+def _inject_attachments(message, attachments):
+    """将聊天附件文本内容注入到用户消息，作为对话上下文。"""
+    import os
+    if not attachments:
+        return message
+    parts = []
+    for fid in attachments:
+        if not fid:
+            continue
+        p = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "uploads", fid)
+        if os.path.exists(p):
+            try:
+                with open(p, 'r', encoding='utf-8', errors='ignore') as f:
+                    txt = f.read()
+                if txt.strip():
+                    parts.append(f"[附件《{fid}》内容]:\n{txt[:8000]}")
+            except Exception:
+                pass
+    if parts:
+        return (message or "") + "\n\n" + "\n\n".join(parts)
+    return message
+
+
+@app.post("/api/kb/upload")
+async def upload_kb_document(file: UploadFile = File(...)):
+    """上传文档 → 解析 → 切片 → 向量化 → 入库。返回文档记录。"""
+    try:
+        import os, uuid
+        upload_dir = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "uploads")
+        os.makedirs(upload_dir, exist_ok=True)
+        raw_name = file.filename or "untitled"
+        safe_name = raw_name.replace("/", "_").replace("\\", "_")
+        stored = f"{uuid.uuid4().hex}_{safe_name}"
+        dest = os.path.join(upload_dir, stored)
+        data = await file.read()
+        with open(dest, 'wb') as f:
+            f.write(data)
+        text, err = _extract_text(dest)
+        if err or not text or not text.strip():
+            return JSONResponse(
+                {"ok": False, "filename": safe_name, "error": err or "文件为空或无法解析为文本"},
+                status_code=422,
+            )
+        chunks = _chunk_text(text)
+        if not chunks:
+            return JSONResponse(
+                {"ok": False, "filename": safe_name, "error": "未提取到可索引文本内容"},
+                status_code=422,
+            )
+        kb = _get_kb()
+        ext = os.path.splitext(safe_name)[1].lower().lstrip('.') or 'txt'
+        added = 0
+        for i, ch in enumerate(chunks):
+            kb.add(
+                title=(f"{safe_name}（第{i+1}段）" if len(chunks) > 1 else safe_name),
+                content=ch,
+                category="document",
+                tags=["upload", ext],
+                source=safe_name,
+                metadata={
+                    "filename": safe_name, "stored": stored, "path": dest,
+                    "type": ext, "size": len(data), "chunk_index": i,
+                    "total_chunks": len(chunks),
+                },
+            )
+            added += 1
+        return {
+            "ok": True, "filename": safe_name, "type": ext,
+            "size": len(data), "size_human": _human_size(len(data)),
+            "chunks": len(chunks), "indexed": added, "source": safe_name,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/kb/documents")
+async def list_kb_documents():
+    """列出已入库文档（按 source 文件名聚合，直接读取 metadata 获取 size/type）。"""
+    try:
+        import os, sqlite3, json
+        kb_path = _kb_db_path()
+        docs = {}
+        with sqlite3.connect(kb_path) as conn:
+            rows = conn.execute(
+                "SELECT id, title, source, metadata, updated_at FROM knowledge"
+            ).fetchall()
+        for row in rows:
+            _id, title, src, meta_json, updated_at = row
+            if not src:
+                continue
+            try:
+                md = json.loads(meta_json) if meta_json else {}
+            except Exception:
+                md = {}
+            if not isinstance(md, dict):
+                md = {}
+            d = docs.setdefault(src, {
+                "name": src, "type": "txt", "size_bytes": 0,
+                "status": "ready", "progress": 100, "chunks": 0,
+                "updated_at": updated_at or "",
+            })
+            d["chunks"] += 1
+            if md.get("size"):
+                d["size_bytes"] = md["size"]
+            if md.get("type"):
+                d["type"] = md["type"]
+            if updated_at and updated_at > d["updated_at"]:
+                d["updated_at"] = updated_at
+        out = []
+        for name, d in docs.items():
+            out.append({
+                "name": d["name"], "type": d["type"],
+                "size": _human_size(d["size_bytes"]), "size_bytes": d["size_bytes"],
+                "status": d["status"], "progress": d["progress"], "chunks": d["chunks"],
+                "updated_at": d["updated_at"],
+            })
+        out.sort(key=lambda x: x.get("updated_at") or "", reverse=True)
+        return {"documents": out, "total": len(out)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/kb/stats")
+async def kb_statistics():
+    """知识库统计。"""
+    try:
+        kb = _get_kb()
+        s = kb.stats()
+        entries = kb.list_entries(limit=100000)
+        doc_sources = set()
+        total_chunks = 0
+        for e in entries:
+            src = e.get("source")
+            if not src:
+                continue
+            doc_sources.add(src)
+            total_chunks += 1
+        return {
+            "total_documents": len(doc_sources),
+            "total_entries": s.get("total_entries", 0),
+            "indexed": len(doc_sources),
+            "total_chunks": total_chunks,
+            "categories": s.get("categories", 0),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/kb/documents/{source}")
+async def delete_kb_document(source: str):
+    """按 source 文件名删除文档（删除其下所有分块）。"""
+    try:
+        kb = _get_kb()
+        entries = kb.list_entries(limit=100000)
+        deleted = 0
+        for e in entries:
+            if e.get("source") == source:
+                kb.delete(e["id"])
+                deleted += 1
+        return {"ok": True, "source": source, "deleted": deleted}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/upload")
+async def upload_chat_file(file: UploadFile = File(...)):
+    """聊天附件上传：存盘并返回 file_id，供对话时作为上下文注入。"""
+    try:
+        import os, uuid
+        upload_dir = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "uploads")
+        os.makedirs(upload_dir, exist_ok=True)
+        raw_name = file.filename or "untitled"
+        safe_name = raw_name.replace("/", "_").replace("\\", "_")
+        stored = f"{uuid.uuid4().hex}_{safe_name}"
+        dest = os.path.join(upload_dir, stored)
+        data = await file.read()
+        with open(dest, 'wb') as f:
+            f.write(data)
+        return {"ok": True, "file_id": stored, "filename": safe_name, "path": dest, "size": len(data)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

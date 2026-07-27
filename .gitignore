@@ -1,0 +1,24 @@
+# 环境与密钥
+.env
+*.pem
+*.key
+# 运行时数据（不入库）
+*.db
+*.db-wal
+*.db-shm
+data/
+logs/
+*.log
+# 备份快照
+.edits_bak/
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+# 临时
+tmp/
+*.tmp
+.DS_Store
