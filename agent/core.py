@@ -495,8 +495,17 @@ class Agent:
 
     def _build_system_prompt(self, session=None, user_message=None) -> str:
         """Build system prompt using three-layer design with memory and context injection."""
-        # Collect tool names for context layer
-        tool_names = [t.name for t in self.tools.list_tools()]
+        # Collect tool names for context layer（暴露策略下只列当前可用工具，其余提示用 tool_find）
+        try:
+            from tools.exposure import exposure_policy, get_exposed_toolsets
+            if exposure_policy() != "all":
+                _exposed = get_exposed_toolsets()
+                tool_names = [t.name for t in self.tools.list_tools(set(_exposed))]
+                tool_names.append("(更多能力：图表/浏览器/知识库/RAG/定时任务/API/团队协作等，先调用 tool_find 搜索激活)")
+            else:
+                tool_names = [t.name for t in self.tools.list_tools()]
+        except Exception:
+            tool_names = [t.name for t in self.tools.list_tools()]
         # Collect recent memories for volatile layer — preferences first
         memory_text = None
         if self._memory:
@@ -1147,11 +1156,29 @@ class Agent:
         return messages
 
     def _get_tool_schemas(self) -> list[dict] | None:
-        """Get tool schemas with generation-based cache invalidation."""
+        """Get tool schemas with generation + exposure-based cache invalidation.
+
+        TOOL_EXPOSURE=core（默认）：只暴露核心工具集 + tool_find 激活的扩展集，
+        把每条消息的工具 schema 从 ~14.9k tokens 压到 ~4k。
+        TOOL_EXPOSURE=all：全量暴露（回滚开关）。
+        """
         gen = self.tools.generation
-        if gen != self._last_tool_generation:
+        try:
+            from tools.exposure import exposure_policy, get_exposed_toolsets
+            if exposure_policy() != "all":
+                exposed = get_exposed_toolsets()
+                key = (gen, exposed)
+                if key != getattr(self, "_last_exposure_key", None):
+                    self._cached_tool_schemas = self.tools.to_openai_schemas(set(exposed))
+                    self._last_exposure_key = key
+                    self._last_tool_generation = gen
+                return self._cached_tool_schemas if self._cached_tool_schemas else None
+        except Exception:
+            pass
+        if gen != self._last_tool_generation or getattr(self, "_last_exposure_key", None) is not None:
             self._cached_tool_schemas = self.tools.to_openai_schemas()
             self._last_tool_generation = gen
+            self._last_exposure_key = None
         return self._cached_tool_schemas if self._cached_tool_schemas else None
 
     async def chat(self, user_message: str, session_id: str | None = None, images: list[str] | None = None, voice_mode: bool = False) -> dict:
