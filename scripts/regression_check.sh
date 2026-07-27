@@ -73,8 +73,23 @@ echo "[5] 审批库写权限检查"
 DBUSER=$(stat -c %U data/approvals.db 2>/dev/null)
 [ "$DBUSER" = "lumu" ] && ok "approvals.db 属主为 lumu" || bad "approvals.db 属主异常: '$DBUSER'"
 
-# 6. git 工作区干净（防止未提交漂移）
-echo "[6] git 状态检查"
+# 6. 进程唯一性：只允许 1 个 run.py，且 MainPID = 端口持有者（防遗留单元/孤儿进程回归）
+echo "[6] 进程唯一性检查"
+NPROC=$(ps aux | grep "run\.py" | grep -v grep | wc -l)
+PORTPID=$(ss -tlnp | grep ":8000" | grep -oE "pid=[0-9]+" | head -1 | cut -d= -f2)
+if [ "$NPROC" -eq 1 ] && [ "$MAINPID" = "$PORTPID" ]; then
+    ok "单实例运行且端口归属正确"
+else
+    bad "进程异常: run.py数量=$NPROC MainPID=$MAINPID PortPID=$PORTPID"
+fi
+
+# 7. 遗留 agent-framework 单元必须保持 masked
+echo "[7] 遗留服务单元检查"
+MASKED=$(systemctl is-enabled agent-framework 2>&1)
+[ "$MASKED" = "masked" ] && ok "agent-framework 已屏蔽" || bad "遗留单元未屏蔽: $MASKED"
+
+# 8. git 工作区干净（防止未提交漂移）
+echo "[8] git 状态检查"
 DIRTY=$(git status --porcelain | wc -l)
 [ "$DIRTY" -eq 0 ] && ok "工作区干净 (HEAD=$(git rev-parse --short HEAD))" || echo "  ⚠️  有 $DIRTY 个未提交变更（提示，不计失败）"
 

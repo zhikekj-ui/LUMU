@@ -3,9 +3,9 @@
 ISSUES=0
 
 # Check systemd service
-if ! systemctl is-active --quiet agent-framework; then
-    echo "[CRITICAL] agent-framework service is not running"
-    systemctl restart agent-framework
+if ! systemctl is-active --quiet lumu-agent; then
+    echo "[CRITICAL] lumu-agent service is not running"
+    systemctl restart lumu-agent
     ISSUES=$((ISSUES+1))
 fi
 
