@@ -3,6 +3,28 @@
 
 def register(registry):
     registry.register(
+        name="skill_pack_list",
+        description="List all SKILL.md skill packs in skills/packs/ (file-based, hot-loaded, human-maintained).",
+        parameters={"type": "object", "properties": {}},
+        handler=list_skill_packs,
+        toolset="skills",
+        emoji="📦",
+    )
+    registry.register(
+        name="skill_pack_read",
+        description="Read the full content of a SKILL.md skill pack by name. Use this before performing a task covered by an unexpanded skill pack.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "The skill pack name"},
+            },
+            "required": ["name"],
+        },
+        handler=read_skill_pack,
+        toolset="skills",
+        emoji="📖",
+    )
+    registry.register(
         name="skill_save",
         description="Save a reusable skill/procedure. Use when you complete a complex task and want to remember how to do it next time.",
         parameters={
@@ -75,6 +97,37 @@ def register(registry):
         toolset="skills",
         emoji="🗑️",
     )
+
+
+def list_skill_packs() -> str:
+    try:
+        from skills.skill_packs import scan_packs
+        packs = scan_packs()
+        if not packs:
+            return "(no skill packs in skills/packs/)"
+        lines = []
+        for p in packs:
+            flags = []
+            if p.get("always"):
+                flags.append("always")
+            if p.get("triggers"):
+                flags.append("triggers: " + ",".join(p["triggers"]))
+            suffix = f" [{'; '.join(flags)}]" if flags else ""
+            lines.append(f"- {p['name']}: {p['description']}{suffix}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error listing skill packs: {e}"
+
+
+def read_skill_pack(name: str) -> str:
+    try:
+        from skills.skill_packs import get_pack
+        p = get_pack(name)
+        if not p:
+            return f"Skill pack not found: {name}"
+        return f"## [技能包] {p['name']}\n\n{p['description']}\n\n---\n\n{p['content']}"
+    except Exception as e:
+        return f"Error reading skill pack: {e}"
 
 
 def _get_skill_manager():

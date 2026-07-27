@@ -590,6 +590,19 @@ class Agent:
         meta = self._metacognition_block()
         # 用户模型（从已确认偏好构建画像）
         umod = self._user_model_block()
+        # SKILL.md 技能包热加载（每条消息实时扫描 skills/packs/，放入即生效）
+        skill_block = ""
+        try:
+            from skills.skill_packs import build_skill_block
+            _msg_for_skills = user_message
+            if not _msg_for_skills and session is not None:
+                for _m in reversed(getattr(session, "messages", []) or []):
+                    if _m.get("role") == "user":
+                        _msg_for_skills = _m.get("content", "")
+                        break
+            skill_block = build_skill_block(_msg_for_skills)
+        except Exception:
+            pass
 
         base_prompt = build_system_prompt(
             agent_name="LUMU AI",
@@ -598,7 +611,7 @@ class Agent:
             context_profile=context_profile,
             lessons=lessons,
         )
-        for _blk in (avoidance, meta, umod):
+        for _blk in (avoidance, meta, umod, skill_block):
             if _blk:
                 base_prompt = base_prompt + "\n\n" + _blk
         try:
