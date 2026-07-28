@@ -76,6 +76,9 @@ CASES = [
     dict(id="B8", cat="工具调用", msg="请实际调用 delegate_task 工具，委派一个子代理去计算 77 乘以 89 的结果并只返回数字，然后把子代理的回复告诉我。",
          checks=[("tool_called", "delegate_task"), ("contains_any", ["6853"])],
          tags=["delegate"]),
+    dict(id="B9", cat="工具调用", msg="先用 cron_list 列出定时任务，然后用 cron_run 立即执行名为「每日晨报」的任务，确认它被执行。",
+         checks=[("tool_called", "cron_run"), ("contains_any", ["已立即执行", "执行", "完成"])],
+         tags=["cron"]),
 
     # === C. 推理计算 (5) ===
     dict(id="C1", cat="推理计算", msg="17 乘以 23 等于多少？只回答数字。",
@@ -137,9 +140,13 @@ def run_check(check, resp: dict) -> bool:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="只跑 smoke 子集")
+    ap.add_argument("--ids", default="", help="只跑指定用例，逗号分隔，如 D1,D3")
     args = ap.parse_args()
 
     cases = [c for c in CASES if not args.quick or "smoke" in c.get("tags", [])]
+    if args.ids:
+        wanted = {x.strip().upper() for x in args.ids.split(",") if x.strip()}
+        cases = [c for c in cases if c["id"].upper() in wanted]
     run_id = time.strftime("%Y%m%d_%H%M%S")
     results = []
     print(f"== LUMU 评测基准 run={run_id} 共 {len(cases)} 题 ==")

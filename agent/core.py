@@ -2062,8 +2062,8 @@ class Agent:
                         # 安全默认：pending 超过 300s 在 get_pending() 中自动转为 denied。
                         return (
                             f"⏳ 操作已挂起等待人工审批（action_id={action.action_id}，风险等级={action.risk_level}）。\n"
-                            f"在审批通过前该操作不会执行。审批方式：调用 approval_pending 查看待办、"
-                            f"approval_approve 通过（通过后会立即执行）、approval_deny 拒绝。\n"
+                            f"在人工批准前该操作不会执行。你【无权批准】此操作，也不要尝试换用其他工具或改写命令绕过审批；"
+                            f"请把 action_id 告知用户，由人类在审批接口（POST /api/approvals/{action.action_id}/approve）处理。\n"
                             f"（安全默认：若 5 分钟内未审批，自动否决且永不执行。）"
                         )
             except Exception:

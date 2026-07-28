@@ -701,6 +701,41 @@ async def delete_cron_job(job_id: str, _=Depends(verify_api_key)):
     raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
 
 
+# --- HITL 人工审批（模型无权批准，只能人类通过这些端点操作）---
+class ApprovalActionRequest(BaseModel):
+    feedback: str = ""
+    reason: str = ""
+
+
+@app.get("/api/approvals")
+async def list_pending_approvals(_=Depends(verify_api_key)):
+    """列出待审批的高风险操作。"""
+    from agent.hitl import get_approval_manager
+    return {"pending": get_approval_manager().get_pending()}
+
+
+@app.post("/api/approvals/{action_id}/approve")
+async def approve_action(action_id: str, req: ApprovalActionRequest = None, _=Depends(verify_api_key)):
+    """人工批准挂起操作并立即执行（唯一合法的批准通道）。"""
+    from tools.hitl_tools import approve_and_execute
+    feedback = req.feedback if req else ""
+    result = await approve_and_execute(action_id, feedback=feedback)
+    ok = result.startswith("✅") or result.startswith("已批准")
+    if not ok:
+        raise HTTPException(status_code=404, detail=result)
+    return {"ok": True, "result": result}
+
+
+@app.post("/api/approvals/{action_id}/deny")
+async def deny_action(action_id: str, req: ApprovalActionRequest = None, _=Depends(verify_api_key)):
+    """人工拒绝挂起操作。"""
+    from agent.hitl import get_approval_manager
+    reason = req.reason if req else ""
+    if get_approval_manager().deny(action_id, reason=reason):
+        return {"ok": True}
+    raise HTTPException(status_code=404, detail="操作不存在或已过期")
+
+
 # --- Channels ---
 class WebhookMessage(BaseModel):
     text: str

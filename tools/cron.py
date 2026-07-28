@@ -186,14 +186,18 @@ def _toggle_job(job_id: str, enabled: bool) -> str:
     return f"错误：未找到任务 '{job_id}'。"
 
 
-async def _run_job(job_id: str) -> str:
+async def _run_job(job_id: str = "", task_id: str = "") -> str:
+    # 兼容模型常用命名（job_id / task_id）
+    jid = job_id or task_id
+    if not jid:
+        return "错误：需要提供 job_id（或 task_id）来指定要执行的定时任务。"
     sched = _get_scheduler()
-    job = sched.get_job(job_id)
+    job = sched.get_job(jid)
     if not job:
-        return f"错误：未找到任务 '{job_id}'。"
+        return f"错误：未找到任务 '{jid}'。"
     # Execute immediately
     await sched._execute_job(job)
-    return f"定时任务 {job_id} '{job.name}' 已立即执行。"
+    return f"定时任务 {jid} '{job.name}' 已立即执行。"
 
 
 def _job_logs(job_id: str = "", limit: int = 20) -> str:

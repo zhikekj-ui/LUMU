@@ -88,6 +88,15 @@ echo "[7] 遗留服务单元检查"
 MASKED=$(systemctl is-enabled agent-framework 2>&1)
 [ "$MASKED" = "masked" ] && ok "agent-framework 已屏蔽" || bad "遗留单元未屏蔽: $MASKED"
 
+# 7.5 模型不可自批（防止 approval_approve 被重新注册为模型工具）
+echo "[7.5] HITL 自批漏洞防回归"
+SELF_APPROVE=$(grep -c 'name="approval_approve"' /opt/agent-framework/tools/hitl_tools.py || true)
+if [ "$SELF_APPROVE" -eq 0 ]; then
+  ok "approval_approve 未注册为模型工具（批准仅限人工 API）"
+else
+  bad "approval_approve 被注册为模型工具！模型可自批高危操作"
+fi
+
 # 8. git 工作区干净（防止未提交漂移）
 echo "[8] git 状态检查"
 DIRTY=$(git status --porcelain | wc -l)

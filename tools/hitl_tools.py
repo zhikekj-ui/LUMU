@@ -1,7 +1,39 @@
-"""Tools: human-in-the-loop — approval management, feedback loop."""
+"""Tools: human-in-the-loop — approval management, feedback loop.
 
-# 模块级注册表引用，供 approval_approve 在批准后直接执行被挂起的操作
+安全铁律（2026-07-28）：模型【绝不能】自己批准挂起的操作。
+approval_approve 已从模型可调用工具中移除，批准只能走人工 API：
+POST /api/approvals/{action_id}/approve（见 api/main.py）。
+模型侧保留：查看待审批、拒绝、历史、风险预检。
+"""
+
+# 模块级注册表引用，供人工批准后直接执行被挂起的操作
 REGISTRY = None
+
+
+async def approve_and_execute(action_id: str, feedback: str = "") -> str:
+    """人工审批通道专用：批准并立即执行被挂起的操作。
+
+    只允许由 API 层（人类操作）调用，绝不注册为模型工具。
+    """
+    from agent.hitl import get_approval_manager
+
+    mgr = get_approval_manager()
+    ok = mgr.approve(action_id, feedback=feedback)
+    if not ok:
+        return "批准失败：操作不存在或已过期。"
+    # 批准后立即执行被挂起的操作（绕过 HITL 二次拦截；
+    # 命令仍受 tools/terminal.py 中的 CommandSandbox 约束 —— defense in depth）
+    action = mgr.get_status(action_id)
+    if action and action.get("status") == "approved":
+        tool_name = action.get("tool_name")
+        tool_args = action.get("tool_args") or {}
+        if REGISTRY is not None and tool_name:
+            try:
+                result = await REGISTRY.execute(tool_name, tool_args)
+                return f"✅ 已批准并执行 {tool_name}（action_id={action_id}）。\n结果：\n{result}"
+            except Exception as e:
+                return f"✅ 已批准，但执行失败：{e}"
+    return f"已批准操作 {action_id}。"
 
 
 def register(registry):
@@ -21,25 +53,6 @@ def register(registry):
                 f"session={p.get('session_id', '-')}"
             )
         return f"待审批操作 ({len(lines)}):\n" + "\n".join(lines)
-
-    async def handle_approve(**args):
-        mgr = get_approval_manager()
-        ok = mgr.approve(args["action_id"], feedback=args.get("feedback", ""))
-        if not ok:
-            return f"批准失败：操作不存在或已过期。"
-        # 批准后立即执行被挂起的操作（绕过 HITL 二次拦截；
-        # 命令仍受 tools/terminal.py 中的 CommandSandbox 约束 —— defense in depth）
-        action = mgr.get_status(args["action_id"])
-        if action and action.get("status") == "approved":
-            tool_name = action.get("tool_name")
-            tool_args = action.get("tool_args") or {}
-            if REGISTRY is not None and tool_name:
-                try:
-                    result = await REGISTRY.execute(tool_name, tool_args)
-                    return f"✅ 已批准并执行 {tool_name}（action_id={args['action_id']}）。\n结果：\n{result}"
-                except Exception as e:
-                    return f"✅ 已批准，但执行失败：{e}"
-        return f"已批准操作 {args['action_id']}。"
 
     def handle_deny(**args):
         mgr = get_approval_manager()
@@ -90,28 +103,14 @@ def register(registry):
 
     registry.register(
         name="approval_pending",
-        description="查看当前所有待审批的高风险操作。",
+        description="查看当前所有待审批的高风险操作。注意：批准只能由人类在审批接口完成，你不能也不应尝试自行批准；请告知用户等待人工审批。",
         parameters={"type": "object", "properties": {}},
         handler=handle_pending_approvals,
         toolset="hitl",
         emoji="⏳",
     )
-    registry.register(
-        name="approval_approve",
-        description="批准一个待审批的操作；若操作曾被 HITL 挂起，批准后会立即执行。",
-        parameters={
-            "type": "object",
-            "properties": {
-                "action_id": {"type": "string", "description": "操作ID"},
-                "feedback": {"type": "string", "description": "批准备注（可选）"},
-            },
-            "required": ["action_id"],
-        },
-        handler=handle_approve,
-        is_async=True,
-        toolset="hitl",
-        emoji="✅",
-    )
+    # 【安全】approval_approve 已移除：模型不能自己批准挂起操作，
+    # 批准只能由人类通过 POST /api/approvals/{action_id}/approve 完成。
     registry.register(
         name="approval_deny",
         description="拒绝一个待审批的操作。",
