@@ -70,6 +70,9 @@ CASES = [
          checks=[("contains_any", ["ser008873787894"])]),
     dict(id="B6", cat="工具调用", msg="现在几点了？用工具获取服务器当前日期时间告诉我，包含年份。",
          checks=[("regex", r"202[6-9]")]),
+    dict(id="B7", cat="工具调用", msg="用浏览器打开 https://example.com 并提取主要内容，告诉我这个页面的标题是什么。",
+         checks=[("tool_called", "browser_extract_content"), ("contains_any", ["Example Domain", "示例域名"])],
+         tags=["browser"]),
 
     # === C. 推理计算 (5) ===
     dict(id="C1", cat="推理计算", msg="17 乘以 23 等于多少？只回答数字。",

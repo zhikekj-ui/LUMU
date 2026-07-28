@@ -86,13 +86,14 @@ def register(registry):
                     "description": "返回文本的最大字符数，默认5000",
                 },
             },
-            "required": ["url"],
+            "required": [],
         },
         handler=extract_content,
         toolset="browser",
         is_async=True,
         emoji="📄",
     )
+    # 注意：url 设为可选（不传则提取当前已打开页面），故 required 为空
     registry.register(
         name="browser_screenshot",
         description="对指定URL或当前页面截图，返回base64编码的PNG图片。可用于查看页面布局、验证操作结果。",
@@ -217,7 +218,7 @@ async def navigate(url: str, wait_until: str = "load") -> str:
                 if main_text.strip():
                     break
 
-        await page.close()
+        # 注意：不关闭 page，保留会话供后续 extract/click/screenshot 复用
 
         # Clean up whitespace
         main_text = re.sub(r'\n{3,}', '\n\n', main_text)
@@ -233,12 +234,19 @@ async def navigate(url: str, wait_until: str = "load") -> str:
         return f"浏览器导航失败: {e}"
 
 
-async def extract_content(url: str, selector: str = "", max_length: int = 5000) -> str:
-    """Extract main content from a URL."""
+async def extract_content(url: str = "", selector: str = "", max_length: int = 5000) -> str:
+    """Extract main content from a URL. If url is empty, extract from the
+    currently open page (e.g. after browser_navigate) instead of reloading."""
     try:
         _, ctx = await _get_browser()
-        page = await ctx.new_page()
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        if url:
+            page = await ctx.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        else:
+            pages = ctx.pages
+            if not pages:
+                return "请先提供 url 参数，或用 browser_navigate 打开一个页面后再提取。"
+            page = pages[-1]
 
         if selector:
             el = page.locator(selector).first
@@ -259,7 +267,8 @@ async def extract_content(url: str, selector: str = "", max_length: int = 5000) 
             if not text.strip():
                 text = await page.locator("body").inner_text()
 
-        await page.close()
+        if url:
+            await page.close()
 
         text = re.sub(r'\n{3,}', '\n\n', text)
         text = re.sub(r' {2,}', ' ', text).strip()
