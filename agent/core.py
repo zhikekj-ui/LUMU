@@ -640,7 +640,7 @@ class Agent:
             pass
 
         base_prompt = build_system_prompt(
-            agent_name="LUMU AI",
+            agent_name="LUMU",
             tool_names=tool_names,
             memory_text=memory_text,
             context_profile=context_profile,
