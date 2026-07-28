@@ -9,10 +9,22 @@
 import os
 import time
 
-# 常驻核心：终端/文件/搜索/时间/代码沙箱/审批/技能/记忆 ≈ 3.6k tokens
+# 常驻核心（出厂默认点亮，无需 tool_find）。
+# 分层：①基础 IO/执行 ②本地安全能力（推理/可视化/安全/事件/检查点/自适应/会话/可观测/知识/检索）
+# ③核心产品能力（浏览器/定时/子代理）。外部密钥类（视觉/语音/外部API/多模型/学习）
+# 仍保持按需激活，避免无密钥时空占 token 且执行即报错。
+# 注：扩大默认集会带来更多 prompt token（≈ 3.6k → ~11k），换取"满配可用"；
+# 如需极致省 token 可设 TOOL_EXPOSURE=core 并手动缩此集合，或 TOOL_EXPOSURE=all 全量。
 CORE_TOOLSETS = {
+    # ① 基础 IO / 执行
     "terminal", "file", "search", "system", "sandbox",
     "hitl", "skills", "memory",
+    # ② 本地安全能力
+    "reasoning", "visualization", "security", "events",
+    "checkpoint", "adaptive", "session", "observability",
+    "knowledge", "rag",
+    # ③ 核心产品能力
+    "browser", "cron", "orchestration",
 }
 
 TTL_SECONDS = int(os.getenv("TOOL_ACTIVATION_TTL", "900"))  # 激活后保留 15 分钟
