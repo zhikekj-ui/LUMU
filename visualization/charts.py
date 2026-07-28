@@ -17,8 +17,10 @@ class ChartGenerator:
 
     # Chinese font configuration
     CHINESE_FONTS = [
+        "WenQuanYi Zen Hei",
         "WenQuanYi Micro Hei",
         "Noto Sans CJK SC",
+        "Source Han Sans SC",
         "SimHei",
         "Microsoft YaHei",
         "STHeiti",
@@ -36,18 +38,26 @@ class ChartGenerator:
             import matplotlib
             matplotlib.use("Agg")  # Non-interactive backend
             import matplotlib.pyplot as plt
-            
-            # Try to set Chinese font
+            import matplotlib.font_manager as fm
+
+            # Only pick a font that is ACTUALLY installed on this system.
+            # (The previous loop set the first name blindly, so a non-existent
+            #  font like "WenQuanYi Micro Hei" slipped through and Chinese
+            #  text fell back to tofu boxes.)
+            available = {f.name for f in fm.fontManager.ttflist}
+            chosen = None
             for font in self.CHINESE_FONTS:
-                try:
-                    plt.rcParams["font.sans-serif"] = [font] + plt.rcParams["font.sans-serif"]
+                if font == "sans-serif" or font in available:
+                    chosen = font
                     break
-                except Exception:
-                    continue
-            
+            if chosen:
+                plt.rcParams["font.sans-serif"] = [chosen] + [
+                    f for f in plt.rcParams["font.sans-serif"] if f != chosen
+                ]
             plt.rcParams["axes.unicode_minus"] = False  # Fix minus sign display
             self.plt = plt
             self.matplotlib_available = True
+            self.chinese_font = chosen
         except ImportError:
             self.matplotlib_available = False
 

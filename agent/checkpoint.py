@@ -164,15 +164,23 @@ class CheckpointManager:
             return self._row_to_checkpoint(row)
         return None
 
-    def list_checkpoints(self, session_id: str, limit: int = 10) -> list[dict]:
-        """List checkpoints for a session."""
+    def list_checkpoints(self, session_id: str = None, limit: int = 10) -> list[dict]:
+        """List checkpoints for a session. If session_id is None, list all sessions."""
         with self._get_conn() as conn:
-            rows = conn.execute(
-                """SELECT checkpoint_id, stage, created_at, metadata
-                   FROM checkpoints WHERE session_id = ?
-                   ORDER BY created_at DESC LIMIT ?""",
-                (session_id, limit),
-            ).fetchall()
+            if session_id is not None:
+                rows = conn.execute(
+                    """SELECT checkpoint_id, stage, created_at, metadata
+                       FROM checkpoints WHERE session_id = ?
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (session_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT checkpoint_id, stage, created_at, metadata
+                       FROM checkpoints
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
         results = []
         for r in rows:
             d = dict(r)

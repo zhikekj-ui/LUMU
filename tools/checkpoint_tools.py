@@ -29,12 +29,13 @@ def register(registry):
 
     def handle_list_checkpoints(**args):
         mgr = get_checkpoint_manager()
+        sid = args.get("session_id")
         cps = mgr.list_checkpoints(
-            session_id=args["session_id"],
+            session_id=sid,
             limit=args.get("limit", 10),
         )
         if not cps:
-            return f"会话 {args['session_id']} 没有检查点。"
+            return "当前没有任何检查点。" if not sid else f"会话 {sid} 没有检查点。"
         lines = []
         for c in cps:
             lines.append(
@@ -133,14 +134,14 @@ def register(registry):
     )
     registry.register(
         name="checkpoint_list",
-        description="列出某个会话的所有检查点。",
+        description="列出检查点。不传 session_id 时列出所有会话的检查点。",
         parameters={
             "type": "object",
             "properties": {
-                "session_id": {"type": "string", "description": "会话ID"},
+                "session_id": {"type": "string", "description": "会话ID（可选，不填则列出所有会话）"},
                 "limit": {"type": "integer", "description": "返回数量（默认10）"},
             },
-            "required": ["session_id"],
+            "required": [],
         },
         handler=handle_list_checkpoints,
         toolset="checkpoint",
