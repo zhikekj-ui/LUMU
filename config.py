@@ -1,4 +1,21 @@
 """Configuration management."""
+# === SQLite 健壮性补丁（Phase B 稳定性加固，2026-07-28）===
+# 根因：服务所有 SQLite 读写都跑在 async 事件循环里，原连接未设锁超时，
+# 一旦遇锁竞争（并发写 / 遗留进程持锁）会无限阻塞事件循环，拖垮整个服务
+# （曾致全服务不可用）。补丁统一给所有 sqlite3.connect 加 timeout + busy_timeout，
+# 锁等待有上限、到点 fail-fast，单个请求失败而不会瘫痪全局。
+import sqlite3 as _sqlite3
+_orig_connect = _sqlite3.connect
+def _patched_sqlite_connect(*args, **kwargs):
+    kwargs.setdefault("timeout", 5.0)
+    _conn = _orig_connect(*args, **kwargs)
+    try:
+        _conn.execute("PRAGMA busy_timeout=5000")
+    except Exception:
+        pass
+    return _conn
+_sqlite3.connect = _patched_sqlite_connect
+# ===========================================================
 import os
 from pathlib import Path
 from dotenv import load_dotenv

@@ -1,6 +1,7 @@
 import time
 import uuid
 import os
+import asyncio
 from slowapi.errors import RateLimitExceeded
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from middleware.rate_limit import limiter, rate_limit_exceeded_handler
@@ -71,6 +72,17 @@ async def lifespan(app: FastAPI):
     await mcp_bridge.connect_all(tool_registry)
     # Start scheduler
     await scheduler.start()
+    # Startup: pre-initialize session/task singletons off the event loop.
+    # SessionManager.__init__ does synchronous SQLite schema work + legacy JSON
+    # import; doing it here (in a worker thread) avoids constructing it lazily
+    # inside the first chat request's async event loop (which would briefly freeze
+    # request handling). RLock in session_manager makes _get_tracker/_get_manager reentrant.
+    try:
+        from agent.session_manager import _get_tracker
+        await asyncio.to_thread(_get_tracker)
+        logger.info("Session/task manager pre-initialized at startup")
+    except Exception as e:
+        logger.warning(f"Session/task pre-init failed (non-fatal): {e}")
     # Start channels
     try:
         from channels.router import channel_router

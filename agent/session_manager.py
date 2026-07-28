@@ -636,7 +636,7 @@ class TaskTracker:
 
 _manager: Optional[SessionManager] = None
 _tracker: Optional[TaskTracker] = None
-_init_lock = threading.Lock()
+_init_lock = threading.RLock()  # 可重入锁：_get_tracker 持有本锁时会调用 _get_manager（同锁），必须用 RLock 避免同一线程重入死锁（曾致全服务瘫痪）
 
 
 def _get_manager() -> SessionManager:
