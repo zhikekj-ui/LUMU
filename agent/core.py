@@ -167,6 +167,7 @@ class Agent:
         tool_registry: ToolRegistry | None = None,
         system_prompt: str | None = None,
         is_sub_agent: bool = False,
+        max_iterations: int = 50,
     ):
         self.provider_name = provider_name
         self.provider = get_provider(provider_name)
@@ -193,6 +194,7 @@ class Agent:
         except Exception:
             pass
         self._is_sub_agent = is_sub_agent
+        self.max_iterations = max_iterations
         self._sessions: dict[str, Session] = {}
         self._store = SessionStore() if not is_sub_agent else None
         self._memory = MemoryManager() if not is_sub_agent else None
@@ -205,6 +207,27 @@ class Agent:
         self._learning_engine = None
         self._interaction_tracker = None
         self._enhanced_sessions = None
+
+        # 子代理占位属性：必须无条件初始化为 None，否则 chat() 内访问
+        # self._enhanced_rag 等会抛 AttributeError（delegate_task 子代理隔离必经此路径）。
+        self._tracer = None
+        self._approval_mgr = None
+        self._event_bus = None
+        self._checkpoint_mgr = None
+        self._audit_logger = None
+        self._rbac = None
+        self._sandbox = None
+        self._auto_learner = None
+        self._context_profile = None
+        self._reasoning_engine = None
+        self._context_intelligence = None
+        self._intelligent_memory = None
+        self._enhanced_rag = None
+        self._knowledge_graph = None
+        self._expert_orchestrator = None
+        self._code_intelligence = None
+        self._self_learning = None
+        self._smart_tool_scheduler = None
 
         if not is_sub_agent:
             self._load_sessions()
@@ -494,6 +517,9 @@ class Agent:
         return session
 
     def _build_system_prompt(self, session=None, user_message=None) -> str:
+        # 子代理用精简 prompt，不注入记忆/技能/护栏（避免膨胀与对 None 子系统的依赖）
+        if self._is_sub_agent:
+            return self.system_prompt or ""
         """Build system prompt using three-layer design with memory and context injection."""
         # Collect tool names for context layer（暴露策略下只列当前可用工具，其余提示用 tool_find）
         try:
@@ -1344,7 +1370,7 @@ class Agent:
 
         self._emit_turn_events(session.id, "turn.start", {"user_message": user_message[:200]})
 
-        max_iterations = 50
+        max_iterations = self.max_iterations
         assistant_content = ""
         tool_results = []
         _turn_start = time.monotonic()  # P1⑤: 单轮墙钟
@@ -1725,7 +1751,7 @@ class Agent:
         except Exception as _e:
             _log(f"[planning] Error: {_e}")
 
-        max_iterations = 50
+        max_iterations = self.max_iterations
         tool_results_all = []
         consecutive_failures = 0  # v4: Track consecutive tool failures for real-time reflection
         _turn_start = time.monotonic()  # P1⑤: 单轮墙钟

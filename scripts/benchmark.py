@@ -73,6 +73,9 @@ CASES = [
     dict(id="B7", cat="工具调用", msg="用浏览器打开 https://example.com 并提取主要内容，告诉我这个页面的标题是什么。",
          checks=[("tool_called", "browser_extract_content"), ("contains_any", ["Example Domain", "示例域名"])],
          tags=["browser"]),
+    dict(id="B8", cat="工具调用", msg="请实际调用 delegate_task 工具，委派一个子代理去计算 77 乘以 89 的结果并只返回数字，然后把子代理的回复告诉我。",
+         checks=[("tool_called", "delegate_task"), ("contains_any", ["6853"])],
+         tags=["delegate"]),
 
     # === C. 推理计算 (5) ===
     dict(id="C1", cat="推理计算", msg="17 乘以 23 等于多少？只回答数字。",
