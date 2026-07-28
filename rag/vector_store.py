@@ -1,4 +1,10 @@
-"""Vector store — ChromaDB-backed document indexing with embedding support."""
+"""Vector store — SQLite-backed document indexing with pluggable embeddings.
+
+Chunks are stored with their embedding as a BLOB and ranked by cosine similarity.
+The embedding function is injected by the caller: a zero-dependency hash-bucket
+fallback is the default, but a real semantic model (e.g. bge-small-zh-v1.5 via
+fastembed) can be passed in for true semantic retrieval.
+"""
 import hashlib
 import json
 import os
@@ -10,10 +16,11 @@ import numpy as np
 
 
 class VectorStore:
-    """ChromaDB-compatible vector store for document chunks.
+    """Embedding-agnostic vector store for document chunks.
     
-    Uses a lightweight hash-bucket embedding approach for zero-dependency operation,
-    with optional support for sentence-transformers or API-based embeddings.
+    Uses a lightweight hash-bucket embedding by default for zero-dependency
+    operation, with support for real semantic embeddings (fastembed /
+    sentence-transformers / API-based) supplied via the ``embedding_fn`` argument.
     """
 
     def __init__(self, db_path: str, dim: int = 384, embedding_fn=None):

@@ -2,12 +2,16 @@
 import os
 from tools.registry import ToolRegistry
 
+# 复用与知识库统一的语义向量（bge-small-zh-v1.5 / fastembed，512 维），
+# 替换默认的 hash-bucket 伪向量，使 RAG 检索为真实语义匹配而非字面 n-gram 重叠。
+from knowledge.embedding import get_embedding_fn
+
 
 def _get_pipeline():
-    """Lazy-init RAG pipeline."""
+    """Lazy-init RAG pipeline with real semantic embeddings."""
     from rag.pipeline import RAGPipeline
     data_dir = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "rag")
-    return RAGPipeline(data_dir=data_dir)
+    return RAGPipeline(data_dir=data_dir, embedding_fn=get_embedding_fn())
 
 
 def handle_rag_ingest_file(**kwargs):
