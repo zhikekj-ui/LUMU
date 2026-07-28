@@ -25,73 +25,133 @@ class KnowledgeBase:
         self.embedding_fn = embedding_fn or get_embedding_fn()
         self._init_db()
 
+    def _create_schema(self, conn):
+        """Create knowledge base tables, FTS5 index, and sync triggers.
+
+        Idempotent (uses IF NOT EXISTS) so it is safe to call repeatedly.
+        """
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS knowledge (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                category TEXT DEFAULT 'general',
+                tags TEXT DEFAULT '[]',
+                source TEXT,
+                metadata TEXT DEFAULT '{}',
+                embedding BLOB,
+                related_ids TEXT DEFAULT '[]',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_category ON knowledge(category)")
+
+        # Full-text search table
+        conn.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+                title, content, tags,
+                content='knowledge',
+                content_rowid='rowid'
+            )
+        """)
+
+        # Triggers to keep FTS in sync
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS kb_fts_insert AFTER INSERT ON knowledge BEGIN
+                INSERT INTO knowledge_fts(rowid, title, content, tags)
+                VALUES (new.rowid, new.title, new.content, new.tags);
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS kb_fts_delete AFTER DELETE ON knowledge BEGIN
+                INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content, tags)
+                VALUES ('delete', old.rowid, old.title, old.content, old.tags);
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS kb_fts_update AFTER UPDATE ON knowledge BEGIN
+                INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content, tags)
+                VALUES ('delete', old.rowid, old.title, old.content, old.tags);
+                INSERT INTO knowledge_fts(rowid, title, content, tags)
+                VALUES (new.rowid, new.title, new.content, new.tags);
+            END
+        """)
+
+        # v4: Quality scoring columns (non-destructive ALTER for existing DBs)
+        try:
+            conn.execute("ALTER TABLE knowledge ADD COLUMN quality_score REAL DEFAULT 0.5")
+        except Exception:
+            pass  # Column already exists
+        try:
+            conn.execute("ALTER TABLE knowledge ADD COLUMN hit_count INTEGER DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            conn.execute("ALTER TABLE knowledge ADD COLUMN last_used TEXT")
+        except Exception:
+            pass
+
     def _init_db(self):
-        """Initialize knowledge base tables."""
-        import numpy as np
-        
+        """Initialize knowledge base tables with FTS5 self-healing.
+
+        If the FTS5 virtual table is found corrupt ("vtable constructor
+        failed"), the knowledge rows are salvaged from the old file, the
+        corrupt database is moved aside, and a fresh database is rebuilt with
+        the salvaged rows re-inserted -- so a broken FTS never silently kills
+        search.
+        """
+        class _FtsCorrupt(Exception):
+            pass
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                self._create_schema(conn)
+                # Probe: a corrupt FTS5 vtable fails to construct even on a
+                # trivial query, while a healthy (possibly empty) one does not.
+                # Any construction failure means the DB is unhealthy -> rebuild.
+                try:
+                    conn.execute("SELECT rowid FROM knowledge_fts LIMIT 1").fetchall()
+                except sqlite3.DatabaseError:
+                    raise _FtsCorrupt()
+                conn.commit()
+        except _FtsCorrupt:
+            self._rebuild_from_corrupt()
+
+    def _rebuild_from_corrupt(self):
+        """Salvage knowledge rows, swap out the corrupt db, rebuild fresh."""
+        import os
+        import shutil
+
+        salvaged = []
+        try:
+            old = sqlite3.connect(self.db_path)
+            try:
+                salvaged = old.execute(
+                    "SELECT id, title, content, category, tags, source, metadata "
+                    "FROM knowledge"
+                ).fetchall()
+            finally:
+                old.close()
+        except Exception:
+            salvaged = []
+
+        bak = self.db_path + ".corrupt_bak"
+        try:
+            if os.path.exists(bak):
+                os.remove(bak)
+            if os.path.exists(self.db_path):
+                shutil.move(self.db_path, bak)
+        except Exception:
+            pass
+
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS knowledge (
-                    id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    category TEXT DEFAULT 'general',
-                    tags TEXT DEFAULT '[]',
-                    source TEXT,
-                    metadata TEXT DEFAULT '{}',
-                    embedding BLOB,
-                    related_ids TEXT DEFAULT '[]',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            self._create_schema(conn)
+            for row in salvaged:
+                conn.execute(
+                    "INSERT INTO knowledge(id, title, content, category, tags, source, metadata) "
+                    "VALUES (?,?,?,?,?,?,?)", row
                 )
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_kb_category ON knowledge(category)")
-            
-            # Full-text search table
-            conn.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
-                    title, content, tags,
-                    content='knowledge',
-                    content_rowid='rowid'
-                )
-            """)
-            
-            # Triggers to keep FTS in sync
-            conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS kb_fts_insert AFTER INSERT ON knowledge BEGIN
-                    INSERT INTO knowledge_fts(rowid, title, content, tags)
-                    VALUES (new.rowid, new.title, new.content, new.tags);
-                END
-            """)
-            conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS kb_fts_delete AFTER DELETE ON knowledge BEGIN
-                    INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content, tags)
-                    VALUES ('delete', old.rowid, old.title, old.content, old.tags);
-                END
-            """)
-            conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS kb_fts_update AFTER UPDATE ON knowledge BEGIN
-                    INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content, tags)
-                    VALUES ('delete', old.rowid, old.title, old.content, old.tags);
-                    INSERT INTO knowledge_fts(rowid, title, content, tags)
-                    VALUES (new.rowid, new.title, new.content, new.tags);
-                END
-            """)
-            
-            # v4: Quality scoring columns (non-destructive ALTER for existing DBs)
-            try:
-                conn.execute("ALTER TABLE knowledge ADD COLUMN quality_score REAL DEFAULT 0.5")
-            except Exception:
-                pass  # Column already exists
-            try:
-                conn.execute("ALTER TABLE knowledge ADD COLUMN hit_count INTEGER DEFAULT 0")
-            except Exception:
-                pass
-            try:
-                conn.execute("ALTER TABLE knowledge ADD COLUMN last_used TEXT")
-            except Exception:
-                pass
-            
             conn.commit()
 
     def _default_embedding(self, text: str) -> list[float]:
@@ -131,17 +191,28 @@ class KnowledgeBase:
         full_text = f"{title}\n{content}"
         embedding = np.array(self.embedding_fn(full_text), dtype=np.float32)
         emb_blob = embedding.tobytes()
-        
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """INSERT INTO knowledge 
-                   (id, title, content, category, tags, source, metadata, embedding, related_ids)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (entry_id, title, content, category, tags_json, source,
-                 metadata_json, emb_blob, related_json),
-            )
-            conn.commit()
-        
+
+        def _do_insert():
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """INSERT INTO knowledge
+                       (id, title, content, category, tags, source, metadata, embedding, related_ids)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (entry_id, title, content, category, tags_json, source,
+                     metadata_json, emb_blob, related_json),
+                )
+                conn.commit()
+
+        try:
+            _do_insert()
+        except sqlite3.DatabaseError as e:
+            # A corrupt FTS5 virtual table surfaces via the AFTER INSERT trigger.
+            if "vtable constructor failed" in str(e):
+                self._rebuild_from_corrupt()
+                _do_insert()
+            else:
+                raise
+
         return {
             "id": entry_id,
             "title": title,
