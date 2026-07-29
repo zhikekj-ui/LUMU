@@ -601,18 +601,21 @@ class Agent:
             else:
                 memory_text = semantic_hints
 
-        # Inject relevant memories based on last user message (recall_relevant)
+        # Inject relevant memories based on conversation context (semantic recall)
         relevant_memories = None
-        if self._memory and hasattr(self._memory, 'recall_relevant'):
+        if self._memory and hasattr(self._memory, 'recall_semantic'):
             try:
-                last_msg = ""
+                # Build a query from the most recent user turns (richer than last msg only)
+                user_turns = []
                 if session:
                     for msg in reversed(session.messages):
                         if msg.get("role") == "user":
-                            last_msg = msg.get("content", "")[:300]
-                            break
-                if last_msg:
-                    recalled = self._memory.recall_relevant(last_msg, top_k=3, space=space)
+                            user_turns.append(msg.get("content", "")[:500])
+                            if len(user_turns) >= 2:
+                                break
+                query = " ".join(reversed(user_turns)).strip()
+                if query:
+                    recalled = self._memory.recall_semantic(query, top_k=5, space=space)
                     if recalled:
                         rel_parts = ["Relevant Memories (context-aware recall):"]
                         for m in recalled:
@@ -1699,15 +1702,13 @@ class Agent:
         # P2①: 召回结果收集为临时上下文，仅本轮注入，不再写入（并持久化到）session.messages
         _transient_ctx: list[str] = []
 
-        # v4: Intelligent memory recall (skip for voice mode)
-        if not voice_mode and get_intelligent_memory is not None and context_analysis:
+        # v4: Semantic memory recall from real user memories (always-on for text mode)
+        if not voice_mode and self._memory is not None and hasattr(self._memory, 'recall_semantic'):
             try:
-                if self._intelligent_memory is None or asyncio.iscoroutine(self._intelligent_memory):
-                    self._intelligent_memory = await get_intelligent_memory()
-                recalled = await self._intelligent_memory.recall(user_message, top_k=5)
+                recalled = self._memory.recall_semantic(user_message, top_k=5, space=space)
                 if recalled:
                     mem_text = "\n".join(
-                        f"[{m.get('memory_type', '?')}] {m.get('content', '')}"
+                        f"[{m.get('category', '?')}] {m.get('content', '')}"
                         for m in recalled[:5]
                     )
                     _transient_ctx.append(f"智能记忆召回:\n{mem_text}")
@@ -2090,15 +2091,13 @@ class Agent:
         # P2①: 召回结果收集为临时上下文，仅本轮注入，不再写入（并持久化到）session.messages
         _transient_ctx: list[str] = []
 
-        # v4: Intelligent memory recall (skip for voice mode)
-        if not voice_mode and get_intelligent_memory is not None and context_analysis:
+        # v4: Semantic memory recall from real user memories (always-on for text mode)
+        if not voice_mode and self._memory is not None and hasattr(self._memory, 'recall_semantic'):
             try:
-                if self._intelligent_memory is None or asyncio.iscoroutine(self._intelligent_memory):
-                    self._intelligent_memory = await get_intelligent_memory()
-                recalled = await self._intelligent_memory.recall(user_message, top_k=5)
+                recalled = self._memory.recall_semantic(user_message, top_k=5, space=space)
                 if recalled:
                     mem_text = "\n".join(
-                        f"[{m.get('memory_type', '?')}] {m.get('content', '')}"
+                        f"[{m.get('category', '?')}] {m.get('content', '')}"
                         for m in recalled[:5]
                     )
                     _transient_ctx.append(f"智能记忆召回:\n{mem_text}")

@@ -1,5 +1,6 @@
 """Simple SQLite-based memory manager."""
 import json
+import re
 import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
@@ -28,6 +29,12 @@ class MemoryManager:
             conn.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(key, content)
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS memory_vecs (
+                    key TEXT PRIMARY KEY,
+                    vec TEXT
+                )
+            """)
             # Space isolation column (idempotent — safe on existing DBs)
             try:
                 conn.execute("ALTER TABLE memories ADD COLUMN space TEXT DEFAULT 'work'")
@@ -45,6 +52,16 @@ class MemoryManager:
             # Update FTS
             conn.execute("DELETE FROM memories_fts WHERE key=?", (key,))
             conn.execute("INSERT INTO memories_fts (key, content) VALUES (?, ?)", (key, content))
+            # Update dense embedding vector for semantic recall
+            try:
+                from memory.embeddings import embed
+                vec = embed(content)
+                conn.execute(
+                    "INSERT OR REPLACE INTO memory_vecs (key, vec) VALUES (?, ?)",
+                    (key, json.dumps([float(x) for x in vec])),
+                )
+            except Exception:
+                pass
 
     def recall(self, key: str) -> str | None:
         with sqlite3.connect(self.db_path) as conn:
@@ -156,6 +173,77 @@ class MemoryManager:
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:top_k]
 
+    def recall_semantic(self, query: str, top_k: int = 5, space: str | None = None, threshold: float = 0.4) -> list[dict]:
+        """Semantic (meaning-based) recall using dense embeddings + cosine similarity.
+
+        Ranks real user memories by meaning, not keyword overlap. Falls back to
+        keyword ``recall_relevant`` when embeddings are unavailable.
+
+        ``threshold`` filters low-similarity noise (keeps only meaningfully related
+        memories; unrelated queries return empty).
+        """
+        try:
+            from memory.embeddings import embed, cosine
+        except Exception:
+            return self.recall_relevant(query, top_k=top_k, space=space)
+        self._ensure_vectors(space)
+        try:
+            q_vec = embed(query)
+        except Exception:
+            return self.recall_relevant(query, top_k=top_k, space=space)
+        with sqlite3.connect(self.db_path) as conn:
+            if space:
+                rows = conn.execute(
+                    "SELECT m.key, m.content, m.category, v.vec FROM memories m "
+                    "JOIN memory_vecs v ON v.key = m.key WHERE m.space=?",
+                    (space,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT m.key, m.content, m.category, v.vec FROM memories m "
+                    "JOIN memory_vecs v ON v.key = m.key"
+                ).fetchall()
+        scored = []
+        for key, content, cat, vec_json in rows:
+            try:
+                vec = json.loads(vec_json)
+            except Exception:
+                continue
+            sim = cosine(q_vec, vec)
+            if sim > threshold:
+                scored.append({"key": key, "content": content, "category": cat, "score": round(sim, 3)})
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return scored[:top_k]
+
+    def _ensure_vectors(self, space: str | None = None) -> None:
+        """Lazily backfill dense vectors for memories that don't have one yet."""
+        try:
+            from memory.embeddings import embed
+            with sqlite3.connect(self.db_path) as conn:
+                if space:
+                    rows = conn.execute(
+                        "SELECT m.key, m.content FROM memories m "
+                        "LEFT JOIN memory_vecs v ON v.key = m.key "
+                        "WHERE m.space=? AND v.key IS NULL",
+                        (space,),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT m.key, m.content FROM memories m "
+                        "LEFT JOIN memory_vecs v ON v.key = m.key WHERE v.key IS NULL"
+                    ).fetchall()
+                for key, content in rows:
+                    try:
+                        vec = embed(content)
+                        conn.execute(
+                            "INSERT OR REPLACE INTO memory_vecs (key, vec) VALUES (?, ?)",
+                            (key, json.dumps([float(x) for x in vec])),
+                        )
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
     def list_all(self, category: str | None = None, space: str | None = None) -> list[dict]:
         with sqlite3.connect(self.db_path) as conn:
             if category and space:
@@ -183,3 +271,4 @@ class MemoryManager:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("DELETE FROM memories WHERE key=?", (key,))
             conn.execute("DELETE FROM memories_fts WHERE key=?", (key,))
+            conn.execute("DELETE FROM memory_vecs WHERE key=?", (key,))
