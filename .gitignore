@@ -22,3 +22,12 @@ venv/
 tmp/
 *.tmp
 .DS_Store
+
+# --- 出厂状态加固：开发痕迹/产物不透出产品 ---
+.env.bak
+*.env
+*.tar.gz
+*.bak*
+white_with_red_text.png
+notes/
+skills/packs/
