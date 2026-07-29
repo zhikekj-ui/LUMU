@@ -34,3 +34,6 @@ skills/packs/
 
 # 前端构建产物（源码在 frontend/，构建输出不入库）
 frontend/dist/
+
+# Node 依赖（前端/JS 工具，不入库）
+node_modules/
