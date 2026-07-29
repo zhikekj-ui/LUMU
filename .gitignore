@@ -31,3 +31,6 @@ tmp/
 white_with_red_text.png
 notes/
 skills/packs/
+
+# 前端构建产物（源码在 frontend/，构建输出不入库）
+frontend/dist/
