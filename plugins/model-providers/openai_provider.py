@@ -5,7 +5,7 @@ from providers.registry import register
 
 register(ProviderProfile(
     name="openai",
-    display_name="OpenAI",
+    display_name="OpenAI 兼容（可自定义 Base URL）",
     base_url="https://api.openai.com/v1",
     api_key_env="OPENAI_API_KEY",
     models=["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"],

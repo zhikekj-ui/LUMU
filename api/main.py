@@ -1945,3 +1945,21 @@ async def set_provider_protocol(provider_name: str, req: ProviderProtocolRequest
     else:
         raise HTTPException(status_code=400, detail="protocol 必须是 openai 或 anthropic")
     return {"ok": True, "provider": provider_name, "protocol": proto, "base_url": p.resolve_base_url()}
+
+
+class ProviderBaseUrlRequest(BaseModel):
+    base_url: str = ""
+
+
+@app.post("/api/config/provider/{provider_name}/base-url")
+async def set_provider_base_url(provider_name: str, req: ProviderBaseUrlRequest, _=Depends(verify_api_key)):
+    """Persist a custom OpenAI-compatible base_url for a provider (e.g. point the
+    OpenAI-compatible provider at SiliconFlow / a local gateway / any compatible service)."""
+    from providers.registry import get as _get_provider
+    from core.user_config import set_provider_override
+    p = _get_provider(provider_name)
+    if not p:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not found")
+    url = (req.base_url or "").strip()
+    set_provider_override(provider_name, {"base_url": url} if url else {})
+    return {"ok": True, "provider": provider_name, "base_url": p.resolve_base_url()}
