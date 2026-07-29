@@ -28,8 +28,20 @@ def register(registry):
     )
 
 
+# 第3层空间隔离：当前空间，决定终端工作目录落在哪个子目录
+_CURRENT_SPACE = os.getenv("AGENT_SPACE", "work")
+
+
+def set_current_space(space: str):
+    """由 agent 在每次对话开始时设置，使终端工作目录落在对应空间子目录下。"""
+    global _CURRENT_SPACE
+    _CURRENT_SPACE = space or "work"
+
+
 def _get_cwd() -> str:
-    return os.getenv("AGENT_HOME", os.getenv("AGENT_BASE_DIR", "/root"))
+    # 跨平台默认工作目录（Windows / macOS / Linux 三端通用），按空间分子目录。
+    base = os.getenv("AGENT_BASE_DIR", os.path.expanduser("~/lumu-workspace"))
+    return os.path.join(base, _CURRENT_SPACE)
 
 
 async def run_terminal(command: str, timeout: int = 30) -> str:

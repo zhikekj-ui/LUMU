@@ -33,16 +33,21 @@ class SkillManager:
             conn.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(name, description, content, tags)
             """)
+            # 空间隔离：skills 归属 work / personal 空间
+            try:
+                conn.execute("ALTER TABLE skills ADD COLUMN space TEXT DEFAULT 'work'")
+            except Exception:
+                pass
 
-    def save(self, name: str, description: str, content: str, tags: str = "") -> bool:
+    def save(self, name: str, description: str, content: str, tags: str = "", space: str = "work") -> bool:
         """Save or update a skill. Returns True if new, False if updated."""
         with sqlite3.connect(self.db_path) as conn:
             existing = conn.execute("SELECT id FROM skills WHERE name=?", (name,)).fetchone()
             if existing:
                 conn.execute(
-                    """UPDATE skills SET description=?, content=?, tags=?, updated_at=datetime('now')
+                    """UPDATE skills SET description=?, content=?, tags=?, space=?, updated_at=datetime('now')
                        WHERE name=?""",
-                    (description, content, tags, name),
+                    (description, content, tags, space, name),
                 )
                 conn.execute("DELETE FROM skills_fts WHERE name=?", (name,))
                 conn.execute("INSERT INTO skills_fts (name, description, content, tags) VALUES (?, ?, ?, ?)",
@@ -50,9 +55,9 @@ class SkillManager:
                 return False
             else:
                 conn.execute(
-                    """INSERT INTO skills (name, description, content, tags)
-                       VALUES (?, ?, ?, ?)""",
-                    (name, description, content, tags),
+                    """INSERT INTO skills (name, description, content, tags, space)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (name, description, content, tags, space),
                 )
                 conn.execute("INSERT INTO skills_fts (name, description, content, tags) VALUES (?, ?, ?, ?)",
                              (name, description, content, tags))
@@ -72,29 +77,37 @@ class SkillManager:
                 "use_count": row[6],
             }
 
-    def list_all(self, tag: str = "") -> list[dict]:
+    def list_all(self, tag: str = "", space: str = "") -> list[dict]:
         with sqlite3.connect(self.db_path) as conn:
+            clauses = []
+            params = []
             if tag:
-                rows = conn.execute(
-                    "SELECT name, description, tags, use_count, updated_at FROM skills WHERE tags LIKE ? ORDER BY use_count DESC",
-                    (f"%{tag}%",),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT name, description, tags, use_count, updated_at FROM skills ORDER BY use_count DESC"
-                ).fetchall()
+                clauses.append("tags LIKE ?")
+                params.append(f"%{tag}%")
+            if space:
+                clauses.append("space=?")
+                params.append(space)
+            where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+            rows = conn.execute(
+                f"SELECT name, description, tags, space, use_count, updated_at FROM skills{where} ORDER BY use_count DESC",
+                params,
+            ).fetchall()
             return [
-                {"name": r[0], "description": r[1], "tags": r[2], "use_count": r[3], "updated_at": r[4]}
+                {"name": r[0], "description": r[1], "tags": r[2], "space": r[3], "use_count": r[4], "updated_at": r[5]}
                 for r in rows
             ]
 
-    def search(self, query: str, limit: int = 5) -> list[dict]:
+    def search(self, query: str, limit: int = 5, space: str = "") -> list[dict]:
         with sqlite3.connect(self.db_path) as conn:
+            fetch_limit = limit * 6 if space else limit
             rows = conn.execute(
-                "SELECT name, description, tags, use_count FROM skills_fts WHERE skills_fts MATCH ? LIMIT ?",
-                (query, limit),
+                "SELECT name, description, tags, use_count, space FROM skills_fts WHERE skills_fts MATCH ? LIMIT ?",
+                (query, fetch_limit),
             ).fetchall()
-            return [{"name": r[0], "description": r[1], "tags": r[2], "use_count": r[3]} for r in rows]
+            results = [{"name": r[0], "description": r[1], "tags": r[2], "use_count": r[3], "space": r[4]} for r in rows]
+            if space:
+                results = [r for r in results if r.get("space") == space]
+            return results[:limit]
 
     def increment_use(self, name: str):
         with sqlite3.connect(self.db_path) as conn:

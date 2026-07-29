@@ -126,6 +126,25 @@ def set_provider_key(provider_name: str, api_key: str) -> bool:
     return True
 
 
+def get_enabled_models(provider_name: str) -> list:
+    """Get the user-checked (enabled) models for a provider."""
+    cfg = load_config()
+    models = cfg.get("providers", {}).get(provider_name, {}).get("enabled_models", [])
+    return models if isinstance(models, list) else []
+
+
+def set_enabled_models(provider_name: str, models: list) -> bool:
+    """Persist the user-checked (enabled) models for a provider."""
+    cfg = load_config()
+    if "providers" not in cfg:
+        cfg["providers"] = {}
+    if provider_name not in cfg["providers"]:
+        cfg["providers"][provider_name] = {}
+    cfg["providers"][provider_name]["enabled_models"] = [m for m in (models or []) if isinstance(m, str) and m.strip()]
+    save_config(cfg)
+    return True
+
+
 def get_tts_config() -> dict:
     """Get TTS configuration."""
     cfg = load_config()

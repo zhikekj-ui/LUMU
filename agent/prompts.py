@@ -18,6 +18,7 @@ def build_system_prompt(
     context_profile: dict | None = None,
     lessons: list[dict] | None = None,
     extra_instructions: str = "",
+    is_new_conversation: bool = False,
 ) -> str:
     """Build a comprehensive system prompt for the AI assistant."""
 
@@ -83,6 +84,11 @@ def build_system_prompt(
 - 语音场景下简短、口语化，适合播报
 - 保持友好但专业，不夸张
 
+## 对话独立性（重要）
+- 每一次"新对话"都是一个**独立的新任务**，从零开始：不要延续、不要总结、也不要主动提及上一次对话或上一次任务的内容。
+- 长期记忆（用户的偏好、事实、知识）始终保留、可在回答时被动使用，但**绝不要主动抛出或复述过去的对话/任务**；即便系统提示里出现了与过去对话/任务相关的记忆，也不要主动复述或延续，除非用户本次明确提到了它（如"上次 / 之前 / 那个任务"）。
+- 当用户只说"你好 / 你能干嘛"或刚开新对话时，做一段通用的自我介绍与示例即可，示例用通用场景，不要引用上一次对话的具体内容。
+
 ## 语言
 - 用户用中文交流时，用中文回复"""
 
@@ -119,16 +125,25 @@ def build_system_prompt(
                 if p not in pending:
                     pending.append(p)
 
-        uctx = f"""
+        if is_new_conversation:
+            # 新对话=全新任务：只给稳定的用户画像，禁止注入"待办/近期焦点"，
+            # 避免模型一开口就延续上一次任务
+            uctx = f"""
+## User Information
+- Role: {user_info.get('role', 'User')}
+- Expertise: {', '.join(user_info.get('expertise', []))}
+- Related projects: {', '.join([p['name'] for p in projects])}"""
+        else:
+            uctx = f"""
 ## User Information
 - Role: {user_info.get('role', 'User')}
 - Expertise: {', '.join(user_info.get('expertise', []))}
 - Related projects: {', '.join([p['name'] for p in projects])}
 - Recent focus: {', '.join(recent[:5]) if recent else 'None'}"""
-        if pending:
-            uctx += "\n\n## Pending Tasks (proactively advance these)\n"
-            for i, p in enumerate(pending[:5], 1):
-                uctx += f"{i}. {p}\n"
+            if pending:
+                uctx += "\n\n## Pending Tasks (proactively advance these)\n"
+                for i, p in enumerate(pending[:5], 1):
+                    uctx += f"{i}. {p}\n"
         volatile_parts.append(uctx)
 
     # Memory text (passed from core.py)

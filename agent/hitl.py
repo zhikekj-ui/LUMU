@@ -136,10 +136,21 @@ class RiskClassifier:
 
         # 写文件类工具：按敏感路径升级风险
         if tool_name in self._WRITE_TOOLS and base_risk in (RiskLevel.MEDIUM, RiskLevel.HIGH):
-            path = args.get("path", "") or args.get("file_path", "") or ""
-            sensitive = ["/etc/", "/usr/", "/var/", "/root/", ".env", ".ssh", "credentials"]
+            path = (args.get("path", "") or args.get("file_path", "") or "").lower()
+            # 跨平台敏感路径识别：覆盖 Unix / macOS / Windows 系统目录与主目录，
+            # 避免白名单仅含 Unix 路径而在 Windows / macOS 上漏判高危写操作。
+            home = os.path.expanduser("~").lower().rstrip(os.sep)
+            sensitive = [
+                "/etc/", "/usr/", "/var/", "/root/", "/system/", "/library/",
+                ".env", ".ssh", "credentials", "id_rsa", "id_ed25519", "token",
+            ]
+            if home:
+                sensitive.append(home + os.sep)
+            if os.name == "nt":
+                windir = os.environ.get("WINDIR", "C:\\Windows").lower().rstrip("\\") + "\\"
+                sensitive += [windir, "c:\\program files", "c:\\programdata", "c:\\users\\"]
             for s in sensitive:
-                if s in path:
+                if s and s in path:
                     return RiskLevel.HIGH
 
         return base_risk

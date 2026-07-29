@@ -1,0 +1,23 @@
+# 构建上下文排除项：避免把开发机/服务器本地产物打进镜像，
+# 既缩小构建上下文、加快构建，也防止把密钥/会话数据带进镜像。
+.venv/
+.venv
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.git
+.env
+.env.*
+data/
+logs/
+sessions.db
+sessions.db-shm
+sessions.db-wal
+.edits_bak/
+notes/
+tests/
+benchmarks/
+*.md
+Dockerfile.bak
+docker-compose.yml.bak*

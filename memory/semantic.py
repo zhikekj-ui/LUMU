@@ -97,11 +97,20 @@ class SemanticMemory:
                 conn.execute("ALTER TABLE episodic_events ADD COLUMN metadata TEXT DEFAULT '{}'")
             except sqlite3.OperationalError:
                 pass
+            # Space isolation column (idempotent — safe on existing DBs)
+            try:
+                conn.execute("ALTER TABLE semantic_memories ADD COLUMN space TEXT DEFAULT 'work'")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE episodic_events ADD COLUMN space TEXT DEFAULT 'work'")
+            except sqlite3.OperationalError:
+                pass
     
     # ── Semantic Memory Operations ──
     
     def save(self, key: str, content: str, category: str = "general", 
-             importance: float = 0.5, metadata: dict | None = None):
+             importance: float = 0.5, metadata: dict | None = None, space: str = "work"):
         """Save a memory with its semantic embedding."""
         embedding = _embed_text(f"{key} {content}")
         blob = _vec_to_blob(embedding)
@@ -109,27 +118,40 @@ class SemanticMemory:
         
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
-                INSERT INTO semantic_memories (key, content, category, embedding, importance, metadata)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO semantic_memories (key, content, category, embedding, importance, metadata, space)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(key) DO UPDATE SET 
                     content=excluded.content,
                     embedding=excluded.embedding,
                     importance=excluded.importance,
                     metadata=excluded.metadata,
+                    space=excluded.space,
                     updated_at=datetime('now')
-            """, (key, content, category, blob, importance, meta_json))
+            """, (key, content, category, blob, importance, meta_json, space))
     
     def search(self, query: str, limit: int = 5, 
-               category: str = None, min_score: float = 0.1) -> list[dict]:
+               category: str = None, min_score: float = 0.1, space: str | None = None) -> list[dict]:
         """Semantic similarity search — finds memories by meaning, not just keywords."""
         query_vec = _embed_text(query)
         
         with sqlite3.connect(self.db_path) as conn:
-            if category:
+            if category and space:
+                rows = conn.execute(
+                    "SELECT id, key, content, category, embedding, importance, access_count, created_at, metadata, last_accessed "
+                    "FROM semantic_memories WHERE category=? AND space=?",
+                    (category, space),
+                ).fetchall()
+            elif category:
                 rows = conn.execute(
                     "SELECT id, key, content, category, embedding, importance, access_count, created_at, metadata, last_accessed "
                     "FROM semantic_memories WHERE category=?",
                     (category,),
+                ).fetchall()
+            elif space:
+                rows = conn.execute(
+                    "SELECT id, key, content, category, embedding, importance, access_count, created_at, metadata, last_accessed "
+                    "FROM semantic_memories WHERE space=?",
+                    (space,),
                 ).fetchall()
             else:
                 rows = conn.execute(
@@ -214,14 +236,26 @@ class SemanticMemory:
                 "metadata": json.loads(row[7]) if row[7] else {},
             }
     
-    def list_all(self, category: str = None, limit: int = 100) -> list[dict]:
+    def list_all(self, category: str = None, limit: int = 100, space: str | None = None) -> list[dict]:
         """List all memories, optionally filtered by category."""
         with sqlite3.connect(self.db_path) as conn:
-            if category:
+            if category and space:
+                rows = conn.execute(
+                    "SELECT key, content, category, importance, access_count, created_at, metadata "
+                    "FROM semantic_memories WHERE category=? AND space=? ORDER BY updated_at DESC LIMIT ?",
+                    (category, space, limit),
+                ).fetchall()
+            elif category:
                 rows = conn.execute(
                     "SELECT key, content, category, importance, access_count, created_at, metadata "
                     "FROM semantic_memories WHERE category=? ORDER BY updated_at DESC LIMIT ?",
                     (category, limit),
+                ).fetchall()
+            elif space:
+                rows = conn.execute(
+                    "SELECT key, content, category, importance, access_count, created_at, metadata "
+                    "FROM semantic_memories WHERE space=? ORDER BY updated_at DESC LIMIT ?",
+                    (space, limit),
                 ).fetchall()
             else:
                 rows = conn.execute(
@@ -261,7 +295,7 @@ class SemanticMemory:
     
     def record_event(self, event_type: str, description: str, 
                      details: str = "", session_id: str = "",
-                     importance: float = 0.3, metadata: dict | None = None):
+                     importance: float = 0.3, metadata: dict | None = None, space: str = "work"):
         """Record an episodic event (conversation milestone, decision, etc.)."""
         embedding = _embed_text(f"{event_type} {description} {details}")
         blob = _vec_to_blob(embedding)
@@ -269,21 +303,33 @@ class SemanticMemory:
         
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
-                INSERT INTO episodic_events (event_type, description, details, embedding, session_id, importance, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (event_type, description, details, blob, session_id, importance, meta_json))
+                INSERT INTO episodic_events (event_type, description, details, embedding, session_id, importance, metadata, space)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (event_type, description, details, blob, session_id, importance, meta_json, space))
     
     def search_events(self, query: str, limit: int = 5,
-                      event_type: str = None) -> list[dict]:
+                      event_type: str = None, space: str | None = None) -> list[dict]:
         """Search episodic events by semantic similarity."""
         query_vec = _embed_text(query)
         
         with sqlite3.connect(self.db_path) as conn:
-            if event_type:
+            if event_type and space:
+                rows = conn.execute(
+                    "SELECT id, event_type, description, details, embedding, session_id, importance, created_at, metadata "
+                    "FROM episodic_events WHERE event_type=? AND space=?",
+                    (event_type, space),
+                ).fetchall()
+            elif event_type:
                 rows = conn.execute(
                     "SELECT id, event_type, description, details, embedding, session_id, importance, created_at, metadata "
                     "FROM episodic_events WHERE event_type=?",
                     (event_type,),
+                ).fetchall()
+            elif space:
+                rows = conn.execute(
+                    "SELECT id, event_type, description, details, embedding, session_id, importance, created_at, metadata "
+                    "FROM episodic_events WHERE space=?",
+                    (space,),
                 ).fetchall()
             else:
                 rows = conn.execute(

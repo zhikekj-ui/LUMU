@@ -155,6 +155,7 @@ class Session:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     messages: list[dict] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    space: str = "work"  # 空间隔离：work / personal
 
 
 class Agent:
@@ -196,6 +197,7 @@ class Agent:
         self._is_sub_agent = is_sub_agent
         self.max_iterations = max_iterations
         self._sessions: dict[str, Session] = {}
+        self._current_space: str = "work"  # 当前对话所属空间，供记忆工具标注
         self._store = SessionStore() if not is_sub_agent else None
         self._memory = MemoryManager() if not is_sub_agent else None
         self._skills = SkillManager() if not is_sub_agent else None
@@ -480,13 +482,14 @@ class Agent:
                 id=data["id"],
                 messages=data.get("messages", []),
                 created_at=data.get("created_at", ""),
+                space=data.get("space", "work"),
             )
             self._sessions[session.id] = session
 
     def _save_session(self, session: Session):
         """Persist a session to disk."""
         if self._store:
-            self._store.save(session.id, session.messages, session.created_at)
+            self._store.save(session.id, session.messages, session.created_at, session.space)
         # Also save to enhanced session manager if available
         if self._enhanced_sessions:
             try:
@@ -499,7 +502,7 @@ class Agent:
             except Exception:
                 pass  # Non-critical, don't break main flow
 
-    def get_or_create_session(self, session_id: str | None = None) -> Session:
+    def get_or_create_session(self, session_id: str | None = None, space: str | None = None) -> Session:
         if session_id and session_id in self._sessions:
             return self._sessions[session_id]
         if session_id:
@@ -509,17 +512,40 @@ class Agent:
                     id=data["id"],
                     messages=data.get("messages", []),
                     created_at=data.get("created_at", ""),
+                    space=data.get("space", "work"),
                 )
                 self._sessions[session.id] = session
                 return session
-        session = Session(id=session_id or str(uuid.uuid4()))
+        session = Session(id=session_id or str(uuid.uuid4()), space=space or "work")
         self._sessions[session.id] = session
         return session
+
+    # 空间身份画像：工作/个人两套不同的人设，注入系统提示让两个空间行为真正不同
+    SPACE_PROFILES = {
+        "work": {
+            "persona": (
+                "## 身份：工作助理\n"
+                "你当前处于「工作空间」，以专业、高效、严谨的工作助理身份服务。\n"
+                "专注工作相关事务：项目推进、文档与报告写作、代码与脚本、数据分析、会议与邮件、信息检索。\n"
+                "回答应简洁务实、结构化、可直接落地；优先调用工具真实办事，而非空谈。"
+            ),
+        },
+        "personal": {
+            "persona": (
+                "## 身份：生活助理\n"
+                "你当前处于「个人空间」，以温暖、贴心、轻松的生活助理身份服务。\n"
+                "专注个人生活事务：生活规划、兴趣与娱乐、健康与饮食、家庭与社交、购物与旅行。\n"
+                "语气自然亲切，像靠谱的朋友，给出可执行的具体建议。"
+            ),
+        },
+    }
 
     def _build_system_prompt(self, session=None, user_message=None) -> str:
         # 子代理用精简 prompt，不注入记忆/技能/护栏（避免膨胀与对 None 子系统的依赖）
         if self._is_sub_agent:
             return self.system_prompt or ""
+        # 空间隔离：按当前会话所属空间过滤记忆，避免工作/个人串味
+        space = getattr(session, "space", "work") if session else "work"
         """Build system prompt using three-layer design with memory and context injection."""
         # Collect tool names for context layer（暴露策略下只列当前可用工具，其余提示用 tool_find）
         try:
@@ -535,7 +561,7 @@ class Agent:
         # Collect recent memories for volatile layer — preferences first
         memory_text = None
         if self._memory:
-            all_memories = self._memory.list_all()
+            all_memories = self._memory.list_all(space=space)
             if all_memories:
                 # Separate preferences (higher priority) from other memories
                 prefs = [m for m in all_memories if m.get("category") == "preference"]
@@ -561,7 +587,7 @@ class Agent:
             try:
                 stats = self._semantic_memory.get_stats()
                 if stats.get("total_memories", 0) > 0:
-                    recent = self._semantic_memory.list_all()
+                    recent = self._semantic_memory.list_all(space=space)
                     important = [m for m in recent if m.get("importance", 0) >= 0.7]
                     if important:
                         hints = [f"- {m['content'][:100]}" for m in important[:5]]
@@ -586,7 +612,7 @@ class Agent:
                             last_msg = msg.get("content", "")[:300]
                             break
                 if last_msg:
-                    recalled = self._memory.recall_relevant(last_msg, top_k=3)
+                    recalled = self._memory.recall_relevant(last_msg, top_k=3, space=space)
                     if recalled:
                         rel_parts = ["Relevant Memories (context-aware recall):"]
                         for m in recalled:
@@ -639,20 +665,31 @@ class Agent:
         except Exception:
             pass
 
+        # 判断是否为"新对话的第一轮"：没有任何历史助手回复即视为全新任务
+        _is_new_conv = True
+        if session is not None:
+            _msgs = getattr(session, "messages", []) or []
+            _is_new_conv = not any(m.get("role") == "assistant" for m in _msgs)
+        else:
+            _is_new_conv = True
+
         base_prompt = build_system_prompt(
             agent_name="LUMU",
             tool_names=tool_names,
             memory_text=memory_text,
             context_profile=context_profile,
             lessons=lessons,
+            is_new_conversation=_is_new_conv,
         )
         for _blk in (avoidance, meta, umod, skill_block):
             if _blk:
                 base_prompt = base_prompt + "\n\n" + _blk
         try:
             _custom = get_system_prompt()
-            if _custom:
-                base_prompt = _custom + "\n\n" + base_prompt
+            _persona = (getattr(self, "SPACE_PROFILES", {}) or {}).get(space, {}).get("persona", "")
+            prefix = "\n\n".join([p for p in (_custom, _persona) if p])
+            if prefix:
+                base_prompt = prefix + "\n\n" + base_prompt
         except Exception:
             pass
         return base_prompt
@@ -890,31 +927,111 @@ class Agent:
             _log("[usermodel] failed: %s" % _e)
             return None
 
+    def _memory_dedup(self, near_threshold: float = 0.85) -> int:
+        """全库去重：删除内容重复/近重复的记忆，每条只保留一份。
+
+        - 完全重复（归一化词集相同）：保留最近一条，删除其余。
+        - 近重复（同 category 内 Jaccard >= near_threshold）：保留最近一条，删除其余。
+        仅在确有重复时删除，绝不删空某个 category。大库（>2000）时只做精确去重避免 O(n^2) 爆炸。
+        """
+        try:
+            if not self._memory:
+                return 0
+            mems = [m for m in (self._memory.list_all() or []) if m.get("content")]
+            if len(mems) < 2:
+                return 0
+            import re as _re
+            def _norm(s):
+                return set(_re.findall(r"[\w\u4e00-\u9fff]+", (s or "").lower()))
+            def _key_time(m):
+                return str(m.get("created_at") or "")
+            by_cat = {}
+            for m in mems:
+                by_cat.setdefault(m.get("category") or "general", []).append(m)
+            removed = 0
+            _only_exact = len(mems) > 2000
+            for _cat, items in by_cat.items():
+                seen_norm = {}
+                drop_keys = set()
+                for m in items:
+                    n = frozenset(_norm(m["content"]))
+                    if n in seen_norm:
+                        drop_keys.add(m["key"])
+                    else:
+                        seen_norm[n] = m
+                if not _only_exact:
+                    survivors = list(seen_norm.values())
+                    for i in range(len(survivors)):
+                        if survivors[i]["key"] in drop_keys:
+                            continue
+                        for j in range(i + 1, len(survivors)):
+                            if survivors[j]["key"] in drop_keys:
+                                continue
+                            a, b = _norm(survivors[i]["content"]), _norm(survivors[j]["content"])
+                            if not a or not b:
+                                continue
+                            u = a | b
+                            if not u:
+                                continue
+                            jac = len(a & b) / len(u)
+                            if jac >= near_threshold:
+                                t_i = _key_time(survivors[i])
+                                t_j = _key_time(survivors[j])
+                                old = survivors[i]["key"] if t_i <= t_j else survivors[j]["key"]
+                                drop_keys.add(old)
+                for k in drop_keys:
+                    try:
+                        self._memory.delete(k)
+                        removed += 1
+                    except Exception:
+                        pass
+            if removed:
+                _log("[dedup] removed %d duplicate memories" % removed)
+            return removed
+        except Exception as _e:
+            _log("[dedup] failed: %s" % _e)
+            return 0
+
     async def _memory_consolidate(self):
-        """记忆归纳：把高度相似的记忆批量合并为高层抽象记忆（只新增、不删原）。
-        每轮最多合并 MAX_MERGE_PER_RUN 对；本轮已参与合并的记忆标记消费，避免重复/链式归纳。"""
+        """记忆归纳：把高度相似的记忆合并为高层抽象记忆，并清理重复，避免无限膨胀。
+
+        关键修复（此前 bug）：
+        - 合并键改用稳定哈希（sha256），跨进程重启一致 → 同一对记忆只产生一个 consolidated 键，
+          不再因 Python hash() 受 PYTHONHASHSEED 盐值影响而每次算出不同 key、写入大量重复行。
+        - 保存前先与已有 consolidated 记忆比对，近重复（>=0.8）则跳过，保证幂等。
+        - 合并成功后删除两条源记忆，避免下一轮又把它们重新配对重组（链式膨胀）。
+        - 末尾调用全库去重，清理历史遗留的重复条目。
+        """
         try:
             if not self._memory:
                 return 0
             mems = [m for m in (self._memory.list_all() or []) if m.get("content")]
             if len(mems) < 4:
                 return 0
-            import re as _re
+            import re as _re, hashlib as _hl
             def _norm(s):
                 return set(_re.findall(r"[\w\u4e00-\u9fff]+", (s or "").lower()))
+            def _sim(a, b):
+                if not a or not b:
+                    return 0.0
+                u = a | b
+                if not u:
+                    return 0.0
+                return len(a & b) / len(u)
+            existing_consolidated = [m for m in mems if m.get("category") == "consolidated"]
             _pairs = []
             for i in range(len(mems)):
                 for j in range(i + 1, len(mems)):
+                    if mems[i].get("category") == "consolidated" or mems[j].get("category") == "consolidated":
+                        continue
                     a, b = _norm(mems[i]["content"]), _norm(mems[j]["content"])
                     if not a or not b:
                         continue
-                    _u = a | b
-                    if not _u:
-                        continue
-                    jac = len(a & b) / len(_u)
+                    jac = _sim(a, b)
                     if jac >= 0.7:
                         _pairs.append((jac, i, j))
             if not _pairs:
+                self._memory_dedup()
                 return 0
             _pairs.sort(reverse=True)
             client = self._build_client()
@@ -922,9 +1039,9 @@ class Agent:
                 return 0
             sys_p = ("把两条语义高度相似的记忆合并为一条更精炼的高层记忆。"
                      "输出合并后的记忆内容（1-3 句），不要解释。")
-            _MAX_MERGE = 3          # 每轮最多合并对数：归纳吞吐翻 3 倍，成本仍受限
-            _MAX_ATTEMPTS = 6       # LLM 调用硬上限（含失败重试），防失败对无限打
-            _consumed = set()       # 本轮已参与合并的记忆下标
+            _MAX_MERGE = 3
+            _MAX_ATTEMPTS = 6
+            _consumed = set()
             _merged = 0
             _attempts = 0
             for _jac, i, j in _pairs:
@@ -948,15 +1065,30 @@ class Agent:
                     if not merged:
                         _consumed.add(i); _consumed.add(j)
                         continue
-                    _key = "consolidated:%d" % (abs(hash(m1["key"] + "|" + m2["key"])) % 1000000)
-                    self._memory.save(_key, merged, category="consolidated")
-                    _log("[consolidate] merged %s + %s -> %s" % (m1["key"], m2["key"], _key))
-                    _merged += 1
+                    merged_norm = _norm(merged)
+                    _dup = False
+                    for ex in existing_consolidated:
+                        if _sim(merged_norm, _norm(ex["content"])) >= 0.8:
+                            _dup = True
+                            break
+                    if not _dup:
+                        _pair = "|".join(sorted([m1["key"], m2["key"]]))
+                        _digest = _hl.sha256(_pair.encode("utf-8")).hexdigest()[:10]
+                        _key = "consolidated:%s" % _digest
+                        self._memory.save(_key, merged, category="consolidated")
+                        _log("[consolidate] merged %s + %s -> %s" % (m1["key"], m2["key"], _key))
+                        _merged += 1
+                    try:
+                        self._memory.delete(m1["key"])
+                        self._memory.delete(m2["key"])
+                    except Exception:
+                        pass
                 except Exception as _e:
                     _log("[consolidate] merge failed %s+%s: %s" % (m1["key"], m2["key"], _e))
                 _consumed.add(i); _consumed.add(j)
                 if _merged >= _MAX_MERGE:
                     break
+            self._memory_dedup()
             return _merged
         except Exception as _e:
             _log("[consolidate] failed: %s" % _e)
@@ -1067,8 +1199,9 @@ class Agent:
         images: list[str] | None = None,
         reasoning_conclusion: str | None = None,
         transient_context: list[str] | None = None,  # P2①: 仅本轮生效的召回注入，不进持久历史
+        image_caption: str | None = None,
     ) -> list[dict]:
-        messages = [{"role": "system", "content": self._build_system_prompt(user_message=user_message)}]
+        messages = [{"role": "system", "content": self._build_system_prompt(session=session, user_message=user_message)}]
 
         # vN: inject deep-reasoning conclusion as a system message when available
         if reasoning_conclusion:
@@ -1076,8 +1209,8 @@ class Agent:
                 "role": "system",
                 "content": (
                     "以下是经过多策略推理（CoT / ReAct / 自我反思 / 多角度等）"
-                    "得到的分析结论，请基于它组织你的最终回答；"
-                    "保持自然、简洁，不要原样复述推理过程：\n\n"
+                    "得到的分析要点，仅供你参考，请不要照抄或复述下面的任何内容。"
+                    "请用自己的话，独立、自然、简洁地给出最终回答：\n\n"
                     + reasoning_conclusion
                 ),
             })
@@ -1085,7 +1218,7 @@ class Agent:
         # Auto-inject relevant knowledge from knowledge base (v4: with quality tracking)
         try:
             from knowledge.base import KnowledgeBase
-            kb_path = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+            kb_path = self._kb_path()
             kb = KnowledgeBase(db_path=kb_path)
             results, kb_entry_ids = kb.search_with_tracking(user_message, limit=3)
             # Store retrieved entry IDs for post-conversation quality adjustment
@@ -1113,7 +1246,7 @@ class Agent:
         if _is_correction and hasattr(self, '_last_kb_entry_ids') and self._last_kb_entry_ids:
             try:
                 from knowledge.base import KnowledgeBase
-                _kb_path = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+                _kb_path = self._kb_path()
                 _kb = KnowledgeBase(db_path=_kb_path)
                 for _eid in self._last_kb_entry_ids:
                     _kb.adjust_quality(_eid, -0.15)
@@ -1165,9 +1298,15 @@ class Agent:
                 continue
             messages.append(_hm)
 
-        # v8: Build multimodal user message if images present
-        if images:
-            _content = [{"type": "text", "text": user_message}]
+        # v8: Build multimodal user message
+        if images and getattr(self.provider, "supports_vision", False):
+            # 主模型本身吃图：只发图（空消息）时改为引导反问，而不是自动长篇描述图内容
+            _text = user_message
+            if not _text or not _text.strip():
+                _text = ("（用户只发送了图片，没有附带文字问题）请只简短确认已收到这张图片，"
+                         "并反问用户想了解关于它的什么。重要：用一句完整的话回复（例如：『收到图片，你想了解它的什么？』），"
+                         "不要描述图片内容，不要复述，更不要把同一句话说两遍。")
+            _content = [{"type": "text", "text": _text}]
             for _img in images[:5]:  # max 5 images
                 if _img.startswith("data:image/"):
                     _content.append({"type": "image_url", "image_url": {"url": _img}})
@@ -1177,9 +1316,242 @@ class Agent:
                     # Assume base64
                     _content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_img}"}})
             messages.append({"role": "user", "content": _content})
+        elif images and image_caption:
+            # 主模型不吃图，但已由视觉模型理解，把理解结果作为上下文拼入（多模态调度，用户无感）
+            if user_message and user_message.strip():
+                _cap = "\n\n[以下图片已由视觉模型识别，内容如下，请据此回答用户问题：]\n" + image_caption
+            else:
+                # 只发图没提问：引导助手确认收到并反问；caption 只存历史(见 _user_turn_content)，
+                # 不塞进本轮提示，避免模型复述/重复视觉描述（契合"反问引导"：不主动描述图内容）
+                _cap = ("\n\n[用户只发送了图片、没有附带任何文字问题。"
+                        "请只简短确认已收到这张图片，并反问用户想了解关于它的什么（如内容、图中文字、配色、需要做什么等）。"
+                        "重要：用一句完整的话回复（例如：『收到图片，你想了解它的什么？』），"
+                        "不要描述图片内容，也不要把同一句话说两遍。]\n")
+            messages.append({"role": "user", "content": user_message + _cap})
+        elif images:
+            # 无视觉模型可用（或已配置但校验失败）：安全降级，不把图片塞给模型（防 400 崩溃）
+            # 不再写死“视觉模型不可用”这类可能误导的话——具体原因由路由层经 self._last_vision_warning 动态给出
+            _reason = getattr(self, "_last_vision_warning", None)
+            if _reason:
+                _note = " [注意：用户本次附带了 %d 张图片，但图片未能被识别：%s 请仅基于用户文字回答，不要臆测图片内容。]" % (len(images), _reason)
+            else:
+                _note = " [注意：用户本次附带了 %d 张图片，但当前没有可用且已配置密钥的视觉模型，图片无法被解析。请仅基于用户文字回答，不要臆测图片内容，并提示用户图片未被理解。]" % len(images)
+            messages.append({"role": "user", "content": user_message + _note})
         else:
             messages.append({"role": "user", "content": user_message})
         return messages
+
+    def _user_turn_content(self, user_message, images, image_caption):
+        """构造要持久化进会话历史的 user 回合内容。
+
+        带图且视觉模型已理解时，把图的描述一并存进历史，使后续追问
+        （用户不再重发图）仍能理解这张图；否则只存原始文本。
+        """
+        if images and image_caption:
+            return (user_message or "") + "\n\n[以下图片已由视觉模型识别，内容如下，请据此回答用户问题：]\n" + image_caption
+        if images and getattr(self.provider, "supports_vision", False):
+            # 主模型本身吃图：把图（base64/URL）也存进历史，后续追问可重新看到
+            _parts = [{"type": "text", "text": user_message or ""}]
+            for _img in images[:5]:
+                _u = _img if _img.startswith(("data:image/", "http://", "https://")) else "data:image/png;base64," + _img
+                _parts.append({"type": "image_url", "image_url": {"url": _u}})
+            return _parts
+        return user_message
+
+    def _process_attachments(self, files, space):
+        """通用文件附件处理：返回 (img_b64_list, extra_text)。
+        图片(mime image/*)：data URL 进 img_b64_list，走现有视觉路径；
+        文本/代码类：解码后内容内联到 extra_text，模型可直接看到；
+        其他二进制(pdf/docx/zip...)：存到 ~/lumu-workspace/<space>/uploads/，
+        路径记入 extra_text，供 agent 用文件工具读取/解析。
+        """
+        _imgs = []
+        _texts = []
+        if not files:
+            return _imgs, "\n\n".join(_texts)
+        import os, base64, time as _t
+        _base = os.path.expanduser("~/lumu-workspace/" + (space or "work"))
+        _up = os.path.join(_base, "uploads")
+        try:
+            os.makedirs(_up, exist_ok=True)
+        except Exception:
+            _up = None
+        _TEXT_EXT = (".txt", ".md", ".markdown", ".csv", ".json", ".jsonl", ".py", ".js",
+                     ".jsx", ".ts", ".tsx", ".java", ".c", ".cpp", ".h", ".hpp", ".go", ".rs",
+                     ".rb", ".php", ".sh", ".bash", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+                     ".log", ".html", ".htm", ".css", ".scss", ".xml", ".sql", ".tex", ".r",
+                     ".swift", ".kt", ".dart", ".vue")
+        for _f in files:
+            _name = _f.get("name") or "file"
+            _mime = (_f.get("mime") or "").lower()
+            _data = _f.get("data") or ""
+            if not _data:
+                continue
+            if _mime.startswith("image/"):
+                _imgs.append(_data)
+                continue
+            # 去掉 data URL 前缀，取纯 base64
+            _b64 = _data.split(",", 1)[1] if _data.startswith("data:") and "," in _data else _data
+            try:
+                _decoded = base64.b64decode(_b64)
+            except Exception:
+                continue
+            if _mime.startswith("text/") or _name.lower().endswith(_TEXT_EXT):
+                try:
+                    _txt = _decoded.decode("utf-8", "replace")
+                except Exception:
+                    _txt = None
+                if _txt is not None:
+                    _len = len(_txt)
+                    _shown = _txt if _len <= 6000 else (_txt[:6000] + "\n…(内容过长已截断，完整文件已存到工作区)")
+                    _texts.append("【附件 %s 内容】\n%s" % (_name, _shown))
+                    if _up:
+                        try:
+                            with open(os.path.join(_up, os.path.basename(_name)), "wb") as _fh:
+                                _fh.write(_decoded)
+                        except Exception:
+                            pass
+                    continue
+            # 其他二进制：存工作区
+            if _up:
+                _safe = os.path.basename(_name) or "file"
+                _dest = os.path.join(_up, _safe)
+                if os.path.exists(_dest):
+                    _dest = os.path.join(_up, "%d_%s" % (int(_t.time() * 1000), _safe))
+                try:
+                    with open(_dest, "wb") as _fh:
+                        _fh.write(_decoded)
+                    _texts.append("【用户上传文件】%s（类型 %s，已保存到工作区路径 %s，如需读取请用文件工具打开该路径）" % (_name, _mime or "未知", _dest))
+                except Exception as _e:
+                    _texts.append("【用户上传文件】%s 保存失败：%s" % (_name, _e))
+        return _imgs, "\n\n".join(_texts)
+
+    def _classify_vision_error(self, exc, provider_name, model_name) -> str:
+        """把视觉模型调用异常分类成用户能看懂、可执行修复的提示（不再笼统说“没有视觉模型”）。"""
+        _s = str(exc)
+        _low = _s.lower()
+        _label = "%s/%s" % (provider_name, model_name)
+        _status = getattr(exc, "status_code", None)
+        if _status is None:
+            _code = getattr(exc, "code", None)
+            if isinstance(_code, int):
+                _status = _code
+        if _status in (401, 403) or any(k in _low for k in ("authentication", "invalid api key", "api key", "unauthorized", "forbidden", "permission denied")):
+            return "视觉模型 %s 调用失败：API 密钥无效或已失效（%s）。请到「设置」检查该提供商的密钥是否正确、是否已过期。" % (_label, _status or "401/403")
+        if _status == 404 or (("model" in _low) and any(k in _low for k in ("not found", "does not exist", "not exist"))) or "404" in _low:
+            return "视觉模型 %s 调用失败：该模型不存在或已被厂商下线（404）。你配置的视觉模型可能已被替换/下线，请到「设置」换成当前可用的视觉模型（如豆包/GLM/通义千问的视觉模型）。" % _label
+        if _status == 429 or any(k in _low for k in ("rate limit", "quota", "insufficient", "exceeded", "too many requests")):
+            return "视觉模型 %s 调用失败：额度已用完或触发限流（429）。请到对应平台检查余额/套餐，或稍后重试。" % _label
+        if "timeout" in _low or "timed out" in _low:
+            return "视觉模型 %s 调用超时，可能是网络问题或厂商服务波动，请稍后重试。" % _label
+        return "视觉模型 %s 调用失败：%s。请检查该模型的配置（模型名/密钥/额度）或稍后重试。" % (_label, _s[:200])
+
+    async def _describe_images_with_vision_model(self, images: list[str]) -> str | None:
+        """多模态调度：主模型不支持视觉时，自动把图片路由给已配置的视觉模型理解，返回文字描述（用户无感）。
+
+        关键变更：不再相信配置“标记”，而是用真实令牌发一次最小调用去验证模型是否真的可用；
+        对 401/403(密钥失效)、404(模型已下线)、429(额度用完/限流) 等错误分类，并通过
+        self._last_vision_warning 把可诊断的告警抛给上层（由 chat/stream_chat 转达给用户），
+        而不是简单返回 None 让上层误报“未配置视觉模型”。验证结果带缓存（按 provider+model+密钥哈希），
+        密钥变了自动重验；缓存 TTL 内不重复烧令牌。
+        """
+        import time as _t
+        import hashlib as _hl
+        self._last_vision_warning = None
+        _now = _t.time()
+        _cache = getattr(self, "_vision_validate_cache", {})
+        self._vision_validate_cache = _cache
+        try:
+            from providers.registry import discover_providers, list_providers
+            from core.user_config import get_provider_key, get_enabled_models
+        except Exception as _imp_e:
+            _logger.warning("[multimodal] import failed: %s" % _imp_e)
+            self._last_vision_warning = "视觉路由模块加载失败，无法识别图片（内部错误）。"
+            return None
+        _cands = []
+        try:
+            discover_providers()  # 触发插件扫描注册（返回 None，仅副作用）
+            for _p in list_providers():
+                if not getattr(_p, "supports_vision", False):
+                    continue
+                _key = get_provider_key(_p.name)
+                if not _key:
+                    continue
+                _models = get_enabled_models(_p.name) or list(getattr(_p, "models", []) or [])
+                if not _models:
+                    continue
+                for _m in _models:
+                    _cands.append((_p, _m))
+        except Exception as _d_e:
+            _logger.warning("[multimodal] discover failed: %s" % _d_e)
+            self._last_vision_warning = "读取视觉模型配置失败：%s。" % _d_e
+            return None
+        if not _cands:
+            # 真·未配置任何视觉模型：不告警（前端会有温和提示），只降级
+            return None
+        # 视觉特征明显的模型名（如 *-vision / *-vl-* / *-v-plus）排最前，让可用视觉模型第一时间被真实请求命中，
+        # 避免把几十个候选逐个发请求试错、拖慢首次看图。provider 维度仍优先非主模型。
+        def _vis_like(m):
+            _l = (m or "").lower()
+            return any(t in _l for t in ("vision", "vl", "-v-", "v-plus", "vlm", "multimodal"))
+        _cands.sort(key=lambda c: (0 if _vis_like(c[1]) else 1, 0 if c[0].name != self.provider_name else 1))
+        _warnings = []
+        _PROMPT = ("请详细、准确地描述这张图片的全部内容：包括其中所有文字、图表数据、布局结构、关键对象。"
+                   "若图片含文字请原样抄录。输出将帮助另一个文本模型回答用户关于此图的问题。")
+        for _p, _vm in _cands:
+            _key = get_provider_key(_p.name) or ""
+            _kh = _hl.md5(_key.encode("utf-8", "ignore")).hexdigest()[:12]
+            _ck = "%s|%s|%s" % (_p.name, _vm, _kh)
+            _cached = _cache.get(_ck)
+            # 已确认坏掉且在 TTL(600s) 内：直接采纳缓存结论，避免重复烧令牌
+            if _cached and not _cached.get("ok") and (_now - _cached.get("ts", 0)) < 600:
+                _warnings.append(_cached.get("warn", ""))
+                continue
+            try:
+                import httpx as _hx
+                _content = [{"type": "text", "text": _PROMPT}]
+                for _img in images[:5]:
+                    if _img.startswith("data:image/"):
+                        _content.append({"type": "image_url", "image_url": {"url": _img}})
+                    elif _img.startswith(("http://", "https://")):
+                        _content.append({"type": "image_url", "image_url": {"url": _img}})
+                    else:
+                        _content.append({"type": "image_url", "image_url": {"url": "data:image/png;base64," + _img}})
+                # 注意：不能用 AsyncOpenAI。在常驻 asyncio 进程里，openai SDK 发送含 base64 图片的
+                # 请求时会偶发把请求体截断，导致视觉模型报 "Truncated File Read"。改用 httpx 直连
+                # OpenAI 兼容接口，稳定可靠（已在生产环境实证：同进程内 httpx 返回 200，AsyncOpenAI 报 400）。
+                _url = str(_p.resolve_base_url()).rstrip('/') + '/chat/completions'
+                _headers = {'Authorization': 'Bearer ' + _key, 'Content-Type': 'application/json'}
+                _payload = {"model": _vm, "messages": [{"role": "user", "content": _content}], "max_tokens": 1200, "temperature": 0.2}
+                async with _hx.AsyncClient(timeout=60) as _hc:
+                    _hr = await _hc.post(_url, headers=_headers, json=_payload)
+                if _hr.status_code != 200:
+                    raise RuntimeError("HTTP %s: %s" % (_hr.status_code, _hr.text[:300]))
+                _j = _hr.json()
+                _desc = (_j.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+                if _desc:
+                    _cache[_ck] = {"ok": True, "ts": _now}
+                    # [稳] 视觉模型偶发把描述重复输出（尤其退化小图），源头先折一遍
+                    return self._dedup_reply(_desc)
+                _cache[_ck] = {"ok": False, "warn": "视觉模型 %s/%s 返回了空内容，已跳过。" % (_p.name, _vm), "ts": _now}
+                _warnings.append("视觉模型 %s/%s 返回了空内容，已跳过。" % (_p.name, _vm))
+            except Exception as _e:
+                _reason = self._classify_vision_error(_e, _p.name, _vm)
+                _cache[_ck] = {"ok": False, "warn": _reason, "ts": _now}
+                _warnings.append(_reason)
+                _logger.warning("[multimodal] vision model %s/%s failed: %s" % (_p.name, _vm, _e))
+        # 全部失败：去重后只保留最有信息量的 1~2 条原因抛给上层（避免把几十个候选模型的错误全堆给用户）
+        _seen, _uniq = set(), []
+        for _w in _warnings:
+            _k = (_w or "").split("（")[0]
+            if _k and _k not in _seen:
+                _seen.add(_k); _uniq.append(_w)
+        _summary = "；".join(_uniq[:2])
+        if _summary:
+            self._last_vision_warning = "图片暂时无法被识别：你配置的视觉模型均不可用。" + " " + _summary
+        else:
+            self._last_vision_warning = "图片暂时无法被识别：未检测到任何可用且已配置密钥的视觉模型。请到「设置」配置一个有效的视觉模型（如 stepfun 的 step-1o-turbo-vision / 豆包 / GLM / 通义千问 / OpenAI）。"
+        return None
 
     def _get_tool_schemas(self) -> list[dict] | None:
         """Get tool schemas with generation + exposure-based cache invalidation.
@@ -1207,9 +1579,23 @@ class Agent:
             self._last_exposure_key = None
         return self._cached_tool_schemas if self._cached_tool_schemas else None
 
-    async def chat(self, user_message: str, session_id: str | None = None, images: list[str] | None = None, voice_mode: bool = False) -> dict:
+    def _kb_path(self, space: str = None) -> str:
+        """按空间隔离知识库的 DB 路径：data/knowledge_{space}.db。"""
+        sp = space or getattr(self, "_current_space", "work") or "work"
+        home = os.getenv("AGENT_HOME", "/opt/agent-framework")
+        return os.path.join(home, "data", f"knowledge_{sp}.db")
+
+    async def chat(self, user_message: str, session_id: str | None = None, images: list[str] | None = None, files: list[dict] | None = None, voice_mode: bool = False, space: str = "work") -> dict:
         """Single turn: user message → agent response (with tool calls)."""
-        session = self.get_or_create_session(session_id)
+        session = self.get_or_create_session(session_id, space=space)
+        self._current_space = session.space
+        # 第3层空间隔离：文件读写与终端工作目录按当前空间划分
+        try:
+            from tools import file_ops, terminal
+            file_ops.set_current_space(self._current_space)
+            terminal.set_current_space(self._current_space)
+        except Exception:
+            pass
         # Inject reasoning strategy for enhanced intelligence
         # 推理策略注入：对简单对话不注入额外提示，保持自然回复
         _msg_check = user_message.strip().lower()
@@ -1292,11 +1678,6 @@ class Agent:
                     _active_plan_text = _plan  # 供 ReAct 循环做进度核对与收尾核验
                     reasoning_conclusion = (reasoning_conclusion or "") + "\n\n## 执行计划\n" + _plan
                     _log("[reasoning] plan injected (%d steps)" % (_plan.count(chr(10)) + 1))
-                    _trace = await self._execute_plan_steps(_plan, user_message, _rc_client, self.model)
-                    if _trace:
-                        # 注意：这是纯推理预演（未调用工具），明确标注避免与真实执行混淆
-                        reasoning_conclusion = reasoning_conclusion + "\n\n## 分步推理预演（未经工具验证，执行时请以实际工具结果为准）\n" + _trace
-                        _log("[reasoning] plan pre-reasoned (trace %d chars)" % len(_trace))
             except Exception as _pe:
                 _log("[reasoning] plan failed: %s" % _pe)
         # -----------------------------------------------------------------------------------
@@ -1344,7 +1725,29 @@ class Agent:
             except Exception:
                 pass
 
-        messages = self._build_messages(session, user_message, images=images, reasoning_conclusion=reasoning_conclusion, transient_context=_transient_ctx)
+        # 通用文件附件：图片→视觉路径；文本→内联模型；其他→存工作区供工具读取
+        _att_imgs, _att_text = self._process_attachments(files, space)
+        if _att_imgs:
+            images = (list(images) if images else []) + _att_imgs
+        if _att_text:
+            user_message = (user_message or "") + "\n\n" + _att_text
+
+        # 多模态调度：主模型不吃图时，自动路由给已配置的视觉模型理解（用户无感）
+        self._last_vision_warning = None
+        _image_caption = None
+        if images and not getattr(self.provider, "supports_vision", False):
+            try:
+                _image_caption = await self._describe_images_with_vision_model(images)
+            except Exception as _me:
+                _logger.warning("[multimodal] describe failed: %s" % _me)
+                _image_caption = None
+
+        _autonomous_kw = ["自主", "你自己搞定", "独立完成", "全自动", "你来决定", "自己完成", "不用问我", "自行处理"]
+        _autonomous = any(k in user_message for k in _autonomous_kw)
+        messages = self._build_messages(session, user_message, images=images, reasoning_conclusion=reasoning_conclusion, transient_context=_transient_ctx, image_caption=_image_caption)
+        if _autonomous:
+            messages.append({"role": "system", "content": "【自主模式】请独立把任务做到底：遇到失败先自行换方法重试，必要时拆解更多子步骤；只有在涉及不可逆的高风险操作（如删除、覆盖、外发）时才停下确认，普通步骤不要中途问用户，也不要在每步都汇报，直到目标达成或步数用尽再给最终结论。"})
+
 
         # Compress if needed (async version with LLM summarization)
         if self.context.should_compress():
@@ -1371,6 +1774,10 @@ class Agent:
         self._emit_turn_events(session.id, "turn.start", {"user_message": user_message[:200]})
 
         max_iterations = self.max_iterations
+        if _autonomous:
+            max_iterations = max(self.max_iterations, 20)
+            _log("[autonomous] mode ON, max_iterations=%d" % max_iterations)
+
         assistant_content = ""
         tool_results = []
         _turn_start = time.monotonic()  # P1⑤: 单轮墙钟
@@ -1458,6 +1865,7 @@ class Agent:
             if _plan_verified and _draft and len(_draft) > 300 and len(assistant_content) < 0.3 * len(_draft):
                 _log("[plan-drive] post-verify answer too short (%d vs draft %d), using draft" % (len(assistant_content), len(_draft)))
                 assistant_content = _draft
+            assistant_content = self._dedup_reply(assistant_content)
             break
 
         # v3: End turn-level trace span
@@ -1478,7 +1886,7 @@ class Agent:
         })
 
         # Save to session history (full messages including tool calls)
-        session.messages.append({"role": "user", "content": user_message})
+        session.messages.append({"role": "user", "content": self._user_turn_content(user_message, images, _image_caption)})
         session.messages.append({"role": "assistant", "content": assistant_content})
         self._save_session(session)
 
@@ -1499,7 +1907,7 @@ class Agent:
             pass
 
         # v2: Save to semantic memory if notable
-        self._save_semantic(user_message, assistant_content, tool_results)
+        self._save_semantic(user_message, assistant_content, tool_results, space=session.space)
 
         # JARVIS: 记忆归纳 + 主动遗忘 + 知识归纳（后台、限频、可恢复）—— 与 stream_chat 对齐，补齐非流式路径
         self._schedule_knowledge_consolidation()
@@ -1516,17 +1924,69 @@ class Agent:
             },
             "tool_calls": tool_results,
             "compressions": self.context.compression_count,
+            # 视觉路由诊断：图片已附带，但路由到的视觉模型不可用（下线/密钥失效/额度用完）时的可诊断告警
+            "vision_warning": getattr(self, "_last_vision_warning", None),
         }
 
+    @staticmethod
+    def _dedup_reply(text: str) -> str:
+        """防御性去重：折叠模型偶发的整段/整句连续重复，不误伤正常排比/列表。
+
+        三层：
+          (1) 长周期整段重复（重复单元 >= 8 字，如长答案被原样复述两遍）→ 只留一份；
+          (2) 短纯重复（单元 1~7 字、含 >=2 个不同字、整段 <=24 字）：如
+              "纯白色纯白色" → "纯白色"；纯单字 spam（哈哈哈）不误伤；
+          (3) 句级连续重复（按句末标点切分，任意长度的相同相邻句都折叠）。
+        """
+        if not text:
+            return text
+        import re
+        s = text.strip()
+        n = len(s)
+        # 1) 长周期整段重复：s 由某前缀 p(>=8字) 重复 k(>=2) 次构成 → 只留一份
+        if n >= 16:
+            for period in range(8, n // 2 + 1):
+                if n % period == 0:
+                    p = s[:period]
+                    if p.strip() and s == p * (n // period):
+                        return p.strip()
+        # 2) 短纯重复：整段就是某短单元（含>=2个不同字）重复 → 折成一份
+        if 4 <= n <= 24:
+            for period in range(2, n // 2 + 1):
+                if n % period == 0:
+                    p = s[:period]
+                    if p.strip() and len(set(p)) >= 2 and s == p * (n // period):
+                        return p.strip()
+        # 3) 句级连续重复折叠：任意长度的相同相邻句都折叠（不只末尾一对）
+        segs = re.split(r"(?<=[。！？!?\n])", s)
+        segs = [x for x in segs if x.strip()]
+        out = []
+        for seg in segs:
+            if out and seg.strip() == out[-1].strip():
+                continue
+            out.append(seg)
+        deduped = "".join(out).strip()
+        if deduped and deduped != s:
+            return deduped
+        return s
+
     async def stream_chat(
-        self, user_message: str, session_id: str | None = None, images: list[str] | None = None, voice_mode: bool = False
+        self, user_message: str, session_id: str | None = None, images: list[str] | None = None, files: list[dict] | None = None, voice_mode: bool = False, space: str = "work"
     ) -> AsyncIterator[dict]:
         """True streaming — handles tool calls via streaming deltas.
 
         Key improvement: no more re-requesting with stream=True.
         All calls use streaming from the start.
         """
-        session = self.get_or_create_session(session_id)
+        session = self.get_or_create_session(session_id, space=space)
+        self._current_space = session.space
+        # 第3层空间隔离：文件读写与终端工作目录按当前空间划分
+        try:
+            from tools import file_ops, terminal
+            file_ops.set_current_space(self._current_space)
+            terminal.set_current_space(self._current_space)
+        except Exception:
+            pass
         # Inject reasoning strategy for enhanced intelligence
         # 推理策略注入：对简单对话不注入额外提示，保持自然回复
         _msg_check = user_message.strip().lower()
@@ -1609,11 +2069,6 @@ class Agent:
                     _active_plan_text = _plan  # 供流式 ReAct 循环做周期性进度核对
                     reasoning_conclusion = (reasoning_conclusion or "") + "\n\n## 执行计划\n" + _plan
                     _log("[reasoning] plan injected (%d steps)" % (_plan.count(chr(10)) + 1))
-                    _trace = await self._execute_plan_steps(_plan, user_message, _rc_client, self.model)
-                    if _trace:
-                        # 注意：这是纯推理预演（未调用工具），明确标注避免与真实执行混淆
-                        reasoning_conclusion = reasoning_conclusion + "\n\n## 分步推理预演（未经工具验证，执行时请以实际工具结果为准）\n" + _trace
-                        _log("[reasoning] plan pre-reasoned (trace %d chars)" % len(_trace))
             except Exception as _pe:
                 _log("[reasoning] plan failed: %s" % _pe)
         # -----------------------------------------------------------------------------------
@@ -1661,7 +2116,24 @@ class Agent:
             except Exception:
                 pass
 
-        messages = self._build_messages(session, user_message, images=images, reasoning_conclusion=reasoning_conclusion, transient_context=_transient_ctx)
+        # 通用文件附件：图片→视觉路径；文本→内联模型；其他→存工作区供工具读取
+        _att_imgs, _att_text = self._process_attachments(files, space)
+        if _att_imgs:
+            images = (list(images) if images else []) + _att_imgs
+        if _att_text:
+            user_message = (user_message or "") + "\n\n" + _att_text
+
+        # 多模态调度：主模型不吃图时，自动路由给已配置的视觉模型理解（用户无感）
+        self._last_vision_warning = None
+        _image_caption = None
+        if images and not getattr(self.provider, "supports_vision", False):
+            try:
+                _image_caption = await self._describe_images_with_vision_model(images)
+            except Exception as _me:
+                _logger.warning("[multimodal] describe failed: %s" % _me)
+                _image_caption = None
+
+        messages = self._build_messages(session, user_message, images=images, reasoning_conclusion=reasoning_conclusion, transient_context=_transient_ctx, image_caption=_image_caption)
 
         if self.context.should_compress():
             client_tmp = self._build_client()
@@ -1687,6 +2159,19 @@ class Agent:
         self._emit_turn_events(session.id, "turn.start", {"user_message": user_message[:200], "stream": True})
 
         yield {"type": "session", "session_id": session.id}
+        # 进度可视化：计划存在时先推步骤清单（前端 Steps 显示）；v5 规划或推理计划路径统一在此发出
+        if _active_plan_text:
+            try:
+                _plan_steps = [l.strip().lstrip("0123456789.、") for l in _active_plan_text.splitlines() if l.strip()]
+                yield {"type": "plan", "steps": _plan_steps[:8]}
+            except Exception:
+                pass
+
+
+        # 视觉路由诊断：图片已附带但路由到的视觉模型不可用（已下线/密钥失效/额度用完），
+        # 把可诊断的告警作为独立事件抛出，由前端明确告知用户（而非静默降级或误报"未配置"）
+        if getattr(self, "_last_vision_warning", None):
+            yield {"type": "vision_warning", "content": self._last_vision_warning}
 
         # v5: Proactive planning — skip simple messages and voice mode for speed
         try:
@@ -1758,6 +2243,14 @@ class Agent:
 
         for iteration in range(max_iterations):
             # P1⑤: 墙钟上限 — 超时优雅收尾（已执行的工具结果已流式输出）
+            # 进度可视化：每轮推进当前步骤（仅当存在计划时）
+            if _active_plan_text:
+                try:
+                    _total_steps = len([l for l in _active_plan_text.splitlines() if l.strip()]) or 1
+                    yield {"type": "progress", "round": iteration + 1, "total": _total_steps, "phase": "执行中"}
+                except Exception:
+                    pass
+
             if time.monotonic() - _turn_start > self.TURN_WALL_CLOCK_LIMIT:
                 _log(f"[wall-clock] stream turn exceeded {self.TURN_WALL_CLOCK_LIMIT}s at iteration {iteration}, stopping")
                 _notice = "（本轮处理时间超出上限，已执行的步骤结果如上。如需继续，请再发一条消息，我会接着处理。）"
@@ -1774,7 +2267,7 @@ class Agent:
                     "tool_calls": tool_results_all,
                     "compressions": self.context.compression_count,
                 }
-                session.messages.append({"role": "user", "content": user_message})
+                session.messages.append({"role": "user", "content": self._user_turn_content(user_message, images, _image_caption)})
                 session.messages.append({"role": "assistant", "content": _notice})
                 self._save_session(session)
                 return
@@ -1845,7 +2338,11 @@ class Agent:
                                 fn_name = tc.function.name
                                 fn_args = self._coerce_args(fn_name, tc.function.arguments)
                                 yield {"type": "tool_start", "tool": fn_name, "args": fn_args}
-                                result = await self._execute_tool_enhanced(fn_name, fn_args, session_id=session.id)
+                                try:
+                                    result = await self._execute_tool_enhanced(fn_name, fn_args, session_id=session.id)
+                                except Exception as _te:
+                                    _log("[stable] tool exec error (%s): %s" % (fn_name, _te))
+                                    result = "Error: 工具 %s 执行异常: %s" % (fn_name, _te)
                                 tool_results_all.append({"tool": fn_name, "args": fn_args, "result": result})
                                 yield {"type": "tool_result", "tool": fn_name, "result": result}
                                 messages.append({
@@ -1901,7 +2398,11 @@ class Agent:
                     fn_args = self._coerce_args(fn_name, tc["function"]["arguments"])
 
                     yield {"type": "tool_start", "tool": fn_name, "args": fn_args}
-                    result = await self._execute_tool_enhanced(fn_name, fn_args, session_id=session.id)
+                    try:
+                        result = await self._execute_tool_enhanced(fn_name, fn_args, session_id=session.id)
+                    except Exception as _te:
+                        _log("[stable] tool exec error (%s): %s" % (fn_name, _te))
+                        result = "Error: 工具 %s 执行异常: %s" % (fn_name, _te)
                     tool_results_all.append({"tool": fn_name, "args": fn_args, "result": result})
                     yield {"type": "tool_result", "tool": fn_name, "result": result}
                     messages.append({
@@ -1958,10 +2459,11 @@ class Agent:
                 "stream": True,
             })
 
+            _done_content = self._dedup_reply(full_content) if full_content and full_content.strip() else "（抱歉，这次没能生成有效内容，请重试或换个说法。）"
             yield {
                 "type": "done",
                 "session_id": session.id,
-                "content": full_content,
+                "content": _done_content,
                 "model": self.model,
                 "tokens": {
                     "prompt": self.context.last_prompt_tokens,
@@ -1972,7 +2474,7 @@ class Agent:
             }
 
             # Save to session
-            session.messages.append({"role": "user", "content": user_message})
+            session.messages.append({"role": "user", "content": self._user_turn_content(user_message, images, _image_caption)})
             session.messages.append({"role": "assistant", "content": full_content})
             self._save_session(session)
 
@@ -1986,7 +2488,7 @@ class Agent:
             self._track_interaction(user_message, full_content, tool_results_all)
 
             # v2: Save to semantic memory if notable
-            self._save_semantic(user_message, full_content, tool_results_all)
+            self._save_semantic(user_message, full_content, tool_results_all, space=session.space)
 
             # v3: Self-reflection on tool results (background)
             self._schedule_self_reflection(tool_results_all)
@@ -2237,7 +2739,7 @@ class Agent:
         except Exception:
             pass
 
-    def _save_semantic(self, user_msg: str, assistant_msg: str, tool_results: list[dict]):
+    def _save_semantic(self, user_msg: str, assistant_msg: str, tool_results: list[dict], space: str = "work"):
         """Save notable interactions to semantic memory (non-blocking)."""
         if not self._semantic_memory:
             return
@@ -2258,12 +2760,14 @@ class Agent:
                     category="interaction",
                     metadata={"tools": tools},
                     importance=importance,
+                    space=space,
                 )
                 # Also record as episodic event
                 self._semantic_memory.record_event(
                     event_type="tool_execution",
                     description=f"Executed {len(tool_results)} tools: {', '.join(tools)}",
                     metadata={"tools": tools, "user_msg": user_msg[:100]},
+                    space=space,
                 )
             except Exception as e:
                 _log(f"[semantic] Save error: {e}")
@@ -2348,7 +2852,7 @@ class Agent:
 
                 api_key = get_provider_key(self.provider_name)
                 client = AsyncOpenAI(api_key=api_key, base_url=provider_base_url)
-                kb_path = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+                kb_path = self._kb_path()
                 kb = KnowledgeBase(db_path=kb_path)
 
                 for tr in results_snapshot:
@@ -2509,7 +3013,7 @@ class Agent:
                     if json_match:
                         items = json.loads(json_match.group())
 
-                        kb_path = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+                        kb_path = self._kb_path()
                         kb = KnowledgeBase(db_path=kb_path)
 
                         for item in items:
@@ -2585,6 +3089,7 @@ class Agent:
                     client=client,
                     model=model_snapshot,
                     memory_manager=memory_mgr,
+                    space=session.space,
                 )
                 if result:
                     keys = [p["key"] for p in result]
@@ -2614,7 +3119,7 @@ class Agent:
                 return
 
             from knowledge.base import KnowledgeBase
-            kb_path = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+            kb_path = self._kb_path()
             kb = KnowledgeBase(db_path=kb_path)
 
             # Count successes and failures
@@ -2740,7 +3245,7 @@ class Agent:
                                     except:
                                         pass
 
-                        kb_path = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+                        kb_path = self._kb_path()
                         kb = KnowledgeBase(db_path=kb_path)
 
                         for item in items:
@@ -2845,7 +3350,7 @@ class Agent:
                         if _conf < 0.4 and hasattr(self, '_last_kb_entry_ids') and self._last_kb_entry_ids:
                             try:
                                 from knowledge.base import KnowledgeBase
-                                _kp = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+                                _kp = self._kb_path()
                                 _kb = KnowledgeBase(db_path=_kp)
                                 for _eid in self._last_kb_entry_ids:
                                     _kb.adjust_quality(_eid, -0.1)
@@ -2856,7 +3361,7 @@ class Agent:
                         if _conf > 0.8 and _tool_count > 0 and hasattr(self, '_last_kb_entry_ids') and self._last_kb_entry_ids:
                             try:
                                 from knowledge.base import KnowledgeBase
-                                _kp = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+                                _kp = self._kb_path()
                                 _kb = KnowledgeBase(db_path=_kp)
                                 for _eid in self._last_kb_entry_ids:
                                     _kb.adjust_quality(_eid, 0.05)
@@ -2891,7 +3396,7 @@ class Agent:
         async def _do_consolidate():
             try:
                 from knowledge.base import KnowledgeBase
-                _kp = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+                _kp = self._kb_path()
                 _kb = KnowledgeBase(db_path=_kp)
 
                 _all = _kb.list_entries(limit=200)

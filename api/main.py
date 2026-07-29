@@ -1,6 +1,8 @@
 import time
 import uuid
 import os
+import re
+import io
 import asyncio
 from slowapi.errors import RateLimitExceeded
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
@@ -30,6 +32,7 @@ from core.user_config import (
     get_model_preference, set_model_preference,
     get_system_prompt, set_system_prompt,
     get_embedding_config, set_embedding_config,
+    get_enabled_models, set_enabled_models,
 )
 
 # --- Bootstrap ---
@@ -184,6 +187,8 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
     images: list[str] | None = None  # v8: base64 or URL images
+    files: list[dict] | None = None  # 通用文件附件：[{name, mime, data(base64)}]
+    space: str = "work"  # 空间隔离：work / personal
 
 
 class MemoryRequest(BaseModel):
@@ -219,7 +224,7 @@ async def index():
 @app.post("/api/chat")
 async def chat(req: ChatRequest, request: Request, _=Depends(verify_api_key)):
     try:
-        result = await agent.chat(req.message, req.session_id, images=req.images)
+        result = await agent.chat(req.message, req.session_id, images=req.images, files=req.files, space=req.space)
         return JSONResponse(result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -232,7 +237,7 @@ async def chat_stream(req: ChatRequest, request: Request, _=Depends(verify_api_k
 
     async def event_generator():
         try:
-            async for event in agent.stream_chat(req.message, req.session_id, images=req.images):
+            async for event in agent.stream_chat(req.message, req.session_id, images=req.images, files=req.files, space=req.space):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
@@ -246,10 +251,12 @@ async def chat_stream(req: ChatRequest, request: Request, _=Depends(verify_api_k
 
 # --- Sessions ---
 @app.get("/api/sessions")
-async def list_sessions(_=Depends(verify_api_key)):
-    """List all sessions with preview text."""
+async def list_sessions(space: str = "", _=Depends(verify_api_key)):
+    """List all sessions with preview text (可按 space 过滤)."""
     result = []
     for s in agent._sessions.values():
+        if space and getattr(s, "space", "work") != space:
+            continue
         preview = ""
         for m in s.messages:
             if m.get("role") == "user":
@@ -259,6 +266,7 @@ async def list_sessions(_=Depends(verify_api_key)):
             "id": s.id,
             "preview": preview,
             "message_count": len(s.messages),
+            "space": getattr(s, "space", "work"),
         })
     return result
 
@@ -276,16 +284,21 @@ async def get_session(session_id: str, _=Depends(verify_api_key)):
 @app.delete("/api/sessions/{session_id}")
 async def clear_session(session_id: str, _=Depends(verify_api_key)):
     """Delete a session — requires auth."""
-    agent.clear_session(session_id)
+    try:
+        agent.clear_session(session_id)
+    except Exception as e:
+        import logging
+        logging.getLogger("lumu").warning("clear_session cleanup failed for %s: %s", session_id, e)
+    return {"ok": True}
     return {"ok": True}
 
 
 @app.post("/api/sessions")
-async def create_session(_=Depends(verify_api_key)):
-    """Create a new chat session and return its id."""
+async def create_session(space: str = "work", _=Depends(verify_api_key)):
+    """Create a new chat session and return its id (可按 space 指定空间)."""
     new_id = str(uuid.uuid4())
-    session = agent.get_or_create_session(new_id)
-    return {"id": session.id, "preview": "", "message_count": 0}
+    session = agent.get_or_create_session(new_id, space=space)
+    return {"id": session.id, "preview": "", "message_count": 0, "space": session.space}
 
 
 @app.post("/api/auth/login")
@@ -325,9 +338,9 @@ def _save_confirm(key: str, confirmed: bool):
 
 
 @app.get("/api/memory")
-async def list_memories(category: str = "", _=Depends(verify_api_key)):
-    """List all memories, optionally filtered by category."""
-    items = agent.memory.list_all(category if category else None)
+async def list_memories(category: str = "", space: str = "", _=Depends(verify_api_key)):
+    """List all memories, optionally filtered by category and/or space."""
+    items = agent.memory.list_all(category if category else None, space if space else None)
     confirms = _load_confirms()
     # 归一化（非破坏性）：确保前端三级置信度分级始终有 importance 字段
     for it in items:
@@ -434,11 +447,11 @@ async def memory_conflicts(_=Depends(verify_api_key)):
 
 # --- 统一记忆总线：聚合多存储层（MemoryManager + SemanticMemory）为单一只读视图 ---
 @app.get("/api/memory/unified")
-async def memory_unified(_=Depends(verify_api_key)):
+async def memory_unified(space: str = "", _=Depends(verify_api_key)):
     """非破坏性只读：合并 MemoryManager 与 SemanticMemory，按 key 去重并归一化 importance。"""
     confirms = _load_confirms()
     merged = {}
-    for it in (agent.memory.list_all() or []):
+    for it in (agent.memory.list_all(space=space if space else None) or []):
         if not isinstance(it, dict):
             continue
         key = it.get("key")
@@ -459,7 +472,7 @@ async def memory_unified(_=Depends(verify_api_key)):
             "confirmed": bool(key in confirms and confirms[key]),
         }
     if agent.semantic_memory is not None:
-        for it in (agent.semantic_memory.list_all(limit=2000) or []):
+        for it in (agent.semantic_memory.list_all(limit=2000, space=space if space else None) or []):
             if not isinstance(it, dict):
                 continue
             key = it.get("key")
@@ -690,12 +703,13 @@ class SkillRequest(BaseModel):
     description: str
     content: str
     tags: str = ""
+    space: str = "work"
 
 
 @app.get("/api/skills")
-async def list_skills(tag: str = "", _=Depends(verify_api_key)):
-    """List all saved skills."""
-    return agent.skills.list_all(tag if tag else "")
+async def list_skills(tag: str = "", space: str = "", _=Depends(verify_api_key)):
+    """List all saved skills (可按 space 过滤 work/personal)."""
+    return agent.skills.list_all(tag if tag else "", space if space else "")
 
 
 @app.get("/api/skills/{skill_name}")
@@ -710,7 +724,7 @@ async def get_skill_api(skill_name: str, _=Depends(verify_api_key)):
 @app.post("/api/skills")
 async def save_skill_api(req: SkillRequest, _=Depends(verify_api_key)):
     """Save or update a skill."""
-    is_new = agent.skills.save(req.name, req.description, req.content, req.tags)
+    is_new = agent.skills.save(req.name, req.description, req.content, req.tags, req.space)
     return {"ok": True, "name": req.name, "created": is_new}
 
 
@@ -723,6 +737,74 @@ async def delete_skill_api(skill_name: str, _=Depends(verify_api_key)):
 
 
 @app.get("/api/skills/search")
+@app.get("/api/market/skills")
+async def market_skills(_=Depends(verify_api_key)):
+    import os as _os, shutil as _sh
+    base = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "skills")
+    packs = _os.path.join(base, "packs")
+    out = []
+    if _os.path.isdir(packs):
+        for name in sorted(_os.listdir(packs)):
+            pdir = _os.path.join(packs, name)
+            if not _os.path.isdir(pdir):
+                continue
+            meta = {"name": name, "description": "", "installed": _os.path.isdir(_os.path.join(base, name))}
+            md = _os.path.join(pdir, "SKILL.md")
+            if _os.path.isfile(md):
+                try:
+                    with io.open(md, encoding="utf-8") as mf:
+                        t = mf.read()
+                    if t.startswith("---"):
+                        fm = t.split("---", 2)
+                        if len(fm) >= 3:
+                            for ln in fm[1].splitlines():
+                                if ln.strip().startswith("description:"):
+                                    meta["description"] = ln.split(":", 1)[1].strip()
+                except Exception:
+                    pass
+            out.append(meta)
+    return out
+
+@app.post("/api/market/install")
+async def market_install(payload: dict, _=Depends(verify_api_key)):
+    import os as _os, shutil as _sh
+    name = (payload or {}).get("name")
+    if not name:
+        return {"ok": False, "error": "missing name"}
+    base = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "skills")
+    src = _os.path.join(base, "packs", name)
+    dst = _os.path.join(base, name)
+    if not _os.path.isdir(src):
+        return {"ok": False, "error": "pack not found: " + name}
+    if _os.path.exists(dst):
+        return {"ok": True, "already": True}
+    _sh.copytree(src, dst)
+    return {"ok": True, "installed": name}
+
+@app.post("/api/market/publish")
+async def market_publish(payload: dict, _=Depends(verify_api_key)):
+    import os as _os, re as _re
+    p = payload or {}
+    name = (p.get("name") or "").strip()
+    description = (p.get("description") or "").strip()
+    content = (p.get("content") or "").strip()
+    triggers = (p.get("triggers") or "").strip()
+    if not name or not content:
+        return {"ok": False, "error": "name 和 content 不能为空"}
+    if not _re.match(r"^[A-Za-z0-9_-]+$", name):
+        return {"ok": False, "error": "技能名仅允许字母、数字、中划线、下划线"}
+    base = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "skills")
+    pdir = _os.path.join(base, "packs", name)
+    if _os.path.exists(pdir):
+        return {"ok": False, "error": "已存在同名技能包"}
+    _os.makedirs(pdir, exist_ok=True)
+    fm = ["---", "name: " + name, "description: " + description,
+          "triggers: " + triggers, "always: false", "---"]
+    text = "\n".join(fm) + "\n\n" + content + "\n"
+    with io.open(_os.path.join(pdir, "SKILL.md"), "w", encoding="utf-8") as mf:
+        mf.write(text)
+    return {"ok": True, "published": name}
+
 async def search_skills(q: str = "", limit: int = 5, _=Depends(verify_api_key)):
     """Search skills by keyword."""
     if not q:
@@ -813,6 +895,31 @@ async def webhook_message(channel_name: str, msg: WebhookMessage, _=Depends(veri
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# --- Channel callbacks (企业微信 / 飞书 / 钉钉 等回调式渠道) ---
+@app.post("/api/channels/{name}/callback")
+@limiter.exempt
+async def channel_callback(name: str, request: Request):
+    """统一回调入口：回调式渠道把平台推送的消息发到这里。
+
+    各适配器自己完成：验签 -> 解析平台消息 -> 调 agent -> 主动回推。
+    不依赖我们的 API Key（平台用自身签名校验），故豁免速率限制。
+    """
+    from channels.router import channel_router
+    from core.logging_config import get_logger
+    logger = get_logger("api.callback")
+    ch = channel_router.get_channel(name)
+    if ch is None or not hasattr(ch, "handle_callback"):
+        raise HTTPException(status_code=404, detail=f"channel '{name}' not available")
+    try:
+        raw = await request.body()
+        return await ch.handle_callback(raw, request)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"[callback] {name} error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # --- Health ---
 @app.get("/api/health")
 async def health():
@@ -839,7 +946,31 @@ async def health():
 
 # Mount static files last
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+# 健壮性：确保 assets 目录存在再挂载，避免清前端后整个 app 导入失败导致服务起不来
+# 显式 0o755：否则受服务器 umask 影响可能生成 744(其他用户无 x 权限)，
+# 导致 lumu 进程无法进入目录读取 JS/CSS -> Starlette 抛 PermissionError -> 静态资源 401 -> 前端白屏
+os.makedirs(str(STATIC_DIR / "assets"), mode=0o755, exist_ok=True)
 app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon_svg():
+    """浏览器标签页图标（绿色生命体）。"""
+    from fastapi.responses import FileResponse
+    p = STATIC_DIR / "favicon.svg"
+    if p.exists():
+        return FileResponse(str(p), media_type="image/svg+xml")
+    raise HTTPException(status_code=404)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon_ico():
+    """兼容旧浏览器默认请求 /favicon.ico。"""
+    from fastapi.responses import FileResponse
+    p = STATIC_DIR / "favicon.svg"
+    if p.exists():
+        return FileResponse(str(p), media_type="image/svg+xml")
+    raise HTTPException(status_code=404)
 
 
 # --- User Config (Provider API Keys + TTS/STT) ---
@@ -895,8 +1026,67 @@ async def get_provider_configs(_=Depends(verify_api_key)):
             "active_base_url": p.resolve_base_url(),
             "active_protocol": ("anthropic" if ("/anthropic" in p.resolve_base_url() or p.resolve_base_url().rstrip("/").endswith("/api/coding")) else "openai"),
             "api_key_preview": (key[:4] + "****" + key[-4:]) if has_key and len(key) > 8 else ("已配置" if has_key else ""),
+            "enabled_models": get_enabled_models(p.name),
         })
     return {"providers": result, "total": len(result), "system_prompt": get_system_prompt()}
+
+
+@app.get("/api/config/providers/{provider_name}/models")
+async def detect_provider_models(provider_name: str, _=Depends(verify_api_key)):
+    """用已配置密钥调用提供商 /models 接口，自动识别该令牌下真实可用的模型列表。
+
+    识别成功返回 detected=True 与真实模型；失败（无密钥/网络/接口不支持）
+    回退到内置静态列表并返回 detected=False。
+    """
+    from providers.registry import get as get_provider
+    p = get_provider(provider_name)
+    if not p:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not found")
+    key = get_provider_key(provider_name)
+    if not key:
+        return {"detected": False, "reason": "未配置 API Key", "models": p.models,
+                "enabled_models": get_enabled_models(provider_name)}
+    # 用 OpenAI 兼容端点探测（anthropic 端点不提供 /models 列表）
+    base = p.resolve_base_url()
+    if "/anthropic" in base or base.rstrip("/").endswith("/api/coding"):
+        base = p.base_url
+    url = base.rstrip("/") + "/models"
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=12) as client:
+            r = await client.get(url, headers={"Authorization": f"Bearer {key}"})
+        if r.status_code != 200:
+            return {"detected": False, "reason": f"HTTP {r.status_code}", "models": p.models,
+                    "enabled_models": get_enabled_models(provider_name)}
+        data = r.json()
+        items = data.get("data", data if isinstance(data, list) else [])
+        models = []
+        for it in items:
+            mid = it.get("id") if isinstance(it, dict) else (it if isinstance(it, str) else None)
+            if mid and mid not in models:
+                models.append(mid)
+        if not models:
+            return {"detected": False, "reason": "接口未返回模型", "models": p.models,
+                    "enabled_models": get_enabled_models(provider_name)}
+        return {"detected": True, "models": sorted(models),
+                "enabled_models": get_enabled_models(provider_name)}
+    except Exception as e:
+        return {"detected": False, "reason": str(e)[:120], "models": p.models,
+                "enabled_models": get_enabled_models(provider_name)}
+
+
+class EnabledModelsRequest(BaseModel):
+    models: list[str]
+
+
+@app.post("/api/config/providers/{provider_name}/enabled-models")
+async def save_enabled_models(provider_name: str, req: EnabledModelsRequest, _=Depends(verify_api_key)):
+    """保存用户勾选启用的模型列表。"""
+    from providers.registry import get as get_provider
+    if not get_provider(provider_name):
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not found")
+    set_enabled_models(provider_name, req.models)
+    return {"ok": True, "provider": provider_name, "enabled_models": get_enabled_models(provider_name)}
 
 
 @app.post("/api/config/provider/{provider_name}/key")
@@ -938,7 +1128,8 @@ async def switch_model(req: ModelSwitchRequest, _=Depends(verify_api_key)):
     provider = get_provider(req.provider)
     if not provider:
         raise HTTPException(status_code=404, detail=f"Provider '{req.provider}' not found")
-    if req.model not in provider.models:
+    allowed = set(provider.models) | set(get_enabled_models(req.provider))
+    if req.model not in allowed:
         raise HTTPException(status_code=400, detail=f"Model '{req.model}' not available for '{req.provider}'")
 
     # Update agent
@@ -1021,12 +1212,11 @@ async def set_embedding_config_api(req: EmbeddingConfigRequest, _=Depends(verify
 
 
 @app.post("/api/kb/reembed")
-async def reembed_knowledge(_=Depends(verify_api_key)):
-    """Re-embed all knowledge entries using current embedding method."""
+async def reembed_knowledge(space: str = "", _=Depends(verify_api_key)):
+    """Re-embed all knowledge entries using current embedding method (按 space 隔离)."""
     try:
         from knowledge.base import KnowledgeBase
-        import os
-        kb_path = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+        kb_path = _kb_db_path(space)
         kb = KnowledgeBase(db_path=kb_path)
         result = kb.reembed_all()
         from knowledge.embedding import get_embedding_info
@@ -1036,15 +1226,21 @@ async def reembed_knowledge(_=Depends(verify_api_key)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _kb_db_path(space: str = ""):
+    """按空间隔离知识库：knowledge_{space}.db，默认 work。"""
+    sp = space or "work"
+    home = os.getenv("AGENT_HOME", "/opt/agent-framework")
+    return os.path.join(home, "data", f"knowledge_{sp}.db")
+
+
 # --- Knowledge Base Documents ---
 
 @app.get("/api/kb/documents")
-async def list_kb_documents(_=Depends(verify_api_key)):
-    """List knowledge base documents with stats."""
+async def list_kb_documents(space: str = "", _=Depends(verify_api_key)):
+    """List knowledge base documents with stats (按 space 隔离)."""
     try:
         from knowledge.base import KnowledgeBase
-        import os
-        kb_path = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+        kb_path = _kb_db_path(space)
         kb = KnowledgeBase(db_path=kb_path)
         entries = kb.list_entries()
         stats = kb.stats()
@@ -1053,55 +1249,168 @@ async def list_kb_documents(_=Depends(verify_api_key)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/kb/documents")
-async def upload_kb_document(file: UploadFile = File(...), _=Depends(verify_api_key)):
-    """Upload a document to the knowledge base.
+def _extract_doc_text(raw: bytes, ext: str, filename: str):
+    """抽取文档纯文本（真实解析，非占位）。
 
-    Supports txt, md, pdf, docx files. Text is extracted and stored.
+    返回 (text, page_marks)：
+      - text: 全文（PDF 按页拼接，带换行）
+      - page_marks: [(char_offset, page_no), ...]，标记某段文本起始于第几页（PDF 用，其余默认第 1 页）
+    解析失败时返回 ("", [(0, 1)])，调用方据此报空文档而非崩溃。
+    """
+    if ext in (".txt", ".md"):
+        text = raw.decode("utf-8", errors="ignore")
+        return text, [(0, 1)]
+
+    if ext == ".pdf":
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(raw))
+            parts = []
+            marks = []
+            for i, page in enumerate(reader.pages):
+                t = page.extract_text() or ""
+                if t.strip():
+                    marks.append((len("".join(parts)), i + 1))
+                    parts.append(t + "\n")
+            return "".join(parts), marks
+        except Exception as e:
+            print(f"[KB] PDF 解析失败 {filename}: {e}")
+            return "", [(0, 1)]
+
+    if ext == ".docx":
+        try:
+            from docx import Document
+            doc = Document(io.BytesIO(raw))
+            paras = [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
+            # 同时抽取表格文本，避免表格内容被漏掉
+            for tbl in doc.tables:
+                for row in tbl.rows:
+                    cells = [c.text.strip() for c in row.cells if c.text and c.text.strip()]
+                    if cells:
+                        paras.append(" | ".join(cells))
+            return "\n".join(paras), [(0, 1)]
+        except Exception as e:
+            print(f"[KB] DOCX 解析失败 {filename}: {e}")
+            return "", [(0, 1)]
+
+    # 兜底：当作 utf-8 文本
+    return raw.decode("utf-8", errors="ignore"), [(0, 1)]
+
+
+def _chunk_text(text: str, size: int = 1200, overlap: int = 200):
+    """把长文按「尽量在段落/换行处断开」切成若干块。
+
+    返回 [{"text": str, "start": int}, ...]，start 为块在原文中的字符偏移（用于页码回溯）。
+    单段落超长时会硬切，避免一条 entry 过长。
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    chunks = []
+    i = 0
+    n = len(text)
+    while i < n:
+        end = min(i + size, n)
+        if end < n:
+            # 在窗口内靠后位置找换行作为断点，尽量不劈开句子
+            nl = text.find("\n", i + int(size * 0.55), end)
+            if nl != -1:
+                end = nl
+        seg = text[i:end].strip()
+        if seg:
+            chunks.append({"text": seg, "start": i})
+        if end >= n:
+            break
+        i = max(end - overlap, i + 1)
+    return chunks
+
+
+def _page_for_chunk(page_marks, start):
+    """根据字符偏移回溯该块所属页码（仅 PDF 有意义）。"""
+    if not page_marks:
+        return None
+    page = page_marks[0][1]
+    for off, pg in page_marks:
+        if off <= start:
+            page = pg
+        else:
+            break
+    return page
+
+
+@app.post("/api/kb/documents")
+async def upload_kb_document(file: UploadFile = File(...), space: str = "", _=Depends(verify_api_key)):
+    """Upload a document to the knowledge base (按 space 隔离).
+
+    真实解析 txt/md/pdf/docx，按语义与长度拆分成多条知识 entry 入库，
+    返回解析统计：识别字符数、拆分段数、入库条数。
     """
     try:
         from knowledge.base import KnowledgeBase
-        import os
-        kb_path = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+        kb_path = _kb_db_path(space)
         kb = KnowledgeBase(db_path=kb_path)
 
-        # Read file content
         raw = await file.read()
         filename = file.filename or "untitled"
         ext = os.path.splitext(filename)[1].lower()
+        base_title = os.path.splitext(filename)[0]
 
-        # Extract text based on file type
-        if ext in (".txt", ".md"):
-            content = raw.decode("utf-8", errors="ignore")
-        elif ext == ".pdf":
-            # Placeholder: PDF text extraction not implemented inline
-            content = f"[PDF content placeholder for {filename}]"
-        elif ext == ".docx":
-            # Placeholder: DOCX text extraction not implemented inline
-            content = f"[DOCX content placeholder for {filename}]"
-        else:
-            # Fallback: try utf-8 decode
-            content = raw.decode("utf-8", errors="ignore")
+        # 1) 抽取文本
+        text, page_marks = _extract_doc_text(raw, ext, filename)
 
-        title = os.path.splitext(filename)[0]
-        entry = kb.add(
-            title=title,
-            content=content,
-            category="uploaded",
-            source=filename,
-        )
-        return {"status": "ok", "entry": entry}
+        # 2) 分块
+        chunks = _chunk_text(text, size=1200, overlap=200) if text.strip() else []
+
+        # 3) 逐块入库
+        added = 0
+        for i, ch in enumerate(chunks):
+            title = base_title if len(chunks) == 1 else f"{base_title}（第{i+1}/{len(chunks)}段）"
+            meta = {
+                "source_file": filename,
+                "chunk_index": i,
+                "chunk_total": len(chunks),
+            }
+            page_no = _page_for_chunk(page_marks, ch["start"])
+            if page_no is not None:
+                meta["page"] = page_no
+            kb.add(
+                title=title,
+                content=ch["text"],
+                category="uploaded",
+                tags=["kb-doc", base_title],
+                source=filename,
+                metadata=meta,
+            )
+            added += 1
+
+        if added == 0:
+            # 解析为空（扫描件 PDF / 空文件）：明确告知，避免用户误以为入库成功
+            return {
+                "status": "empty",
+                "filename": filename,
+                "chars": 0,
+                "chunks": 0,
+                "entries": 0,
+                "message": "文档未解析出可读文本（可能是扫描件图片 PDF 或空文件）",
+            }
+
+        return {
+            "status": "ok",
+            "filename": filename,
+            "chars": len(text),
+            "chunks": len(chunks),
+            "entries": added,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/api/kb/documents/{entry_id}")
-async def delete_kb_document(entry_id: str, _=Depends(verify_api_key)):
-    """Delete a knowledge base document by entry id."""
+async def delete_kb_document(entry_id: str, space: str = "", _=Depends(verify_api_key)):
+    """Delete a knowledge base document by entry id (按 space 隔离)."""
     try:
         from knowledge.base import KnowledgeBase
-        import os
-        kb_path = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+        kb_path = _kb_db_path(space)
         kb = KnowledgeBase(db_path=kb_path)
         result = kb.delete(entry_id)
         return result
@@ -1110,12 +1419,11 @@ async def delete_kb_document(entry_id: str, _=Depends(verify_api_key)):
 
 
 @app.get("/api/kb/stats")
-async def kb_stats(_=Depends(verify_api_key)):
-    """Get knowledge base statistics and categories."""
+async def kb_stats(space: str = "", _=Depends(verify_api_key)):
+    """Get knowledge base statistics and categories (按 space 隔离)."""
     try:
         from knowledge.base import KnowledgeBase
-        import os
-        kb_path = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+        kb_path = _kb_db_path(space)
         kb = KnowledgeBase(db_path=kb_path)
         stats = kb.stats()
         categories = kb.list_categories()
@@ -1173,12 +1481,13 @@ async def get_system_prompt_api(_=Depends(verify_api_key)):
 # --- Knowledge Graph (sphere) ---
 
 @app.get("/api/kb/graph")
-async def kb_graph(_=Depends(verify_api_key)):
-    """返回知识记忆生命球体的节点/边/统计，供前端 Canvas2D 渲染。"""
+async def kb_graph(space: str = "", _=Depends(verify_api_key)):
+    """返回知识记忆生命球体的节点/边/统计，供前端 Canvas2D 渲染（knowledge 按 space 隔离）。"""
     import os, sqlite3, json, math
     from collections import defaultdict, Counter
     base = os.getenv("AGENT_HOME", "/opt/agent-framework")
     data_dir = os.path.join(base, "data")
+    kb_file = f"knowledge_{space or 'work'}.db"
 
     def _vec(blob):
         if blob is None:
@@ -1207,7 +1516,7 @@ async def kb_graph(_=Depends(verify_api_key)):
     nodes = []
     vecs = {}
     try:
-        c = _conn("knowledge.db")
+        c = _conn(kb_file)
         for r in c.execute("SELECT id, title, content, category, embedding FROM knowledge"):
             v = _vec(r[4]); nid = "k:%s" % r[0]
             nodes.append({"id": nid, "type": "knowledge", "label": r[1] or "知识", "text": (r[2] or "")[:240], "category": r[3] or ""})
@@ -1521,9 +1830,13 @@ async def extract_skill_from_session(req: SessionExtractRequest, _=Depends(verif
         name = data.get("name")
         if not name:
             return {"ok": False, "error": "LLM 未返回有效技能"}
+        _sp = getattr(session, "space", "work") or "work"
+        _tags = data.get("tags", "")
+        if _sp not in _tags:
+            _tags = (_tags + "," + _sp).strip(",")
         is_new = agent.skills.save(name, data.get("description", ""),
-                                   data.get("content", ""), data.get("tags", ""))
-        return {"ok": True, "name": name, "created": is_new, "skill": data}
+                                   data.get("content", ""), _tags, _sp)
+        return {"ok": True, "name": name, "created": is_new, "space": _sp, "skill": data}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -1531,14 +1844,17 @@ async def extract_skill_from_session(req: SessionExtractRequest, _=Depends(verif
 # --- Feedback ---
 
 class FeedbackRequest(BaseModel):
-    session_id: str
-    message_index: int
-    feedback: str  # "like" or "dislike"
+    session_id: str = ""
+    message_index: int = -1
+    feedback: str  # "like" or "dislike"（取消时传空字符串 ""）
+    message: str = ""   # 被评价的回复内容（用于记忆摘要）
+    prompt: str = ""    # 对应的用户问题（用于记忆摘要）
+    space: str = ""     # 空间，便于后续按空间隔离分析
 
 
 @app.post("/api/feedback")
 async def submit_feedback(req: FeedbackRequest, _=Depends(verify_api_key)):
-    """Record message feedback (like/dislike)."""
+    """记录消息赞/踩，并落到记忆系统（赞=认可 / 踩=不认可），供智能体后续学习进化。"""
     try:
         logger = get_logger("feedback")
         logger.info(
@@ -1547,6 +1863,31 @@ async def submit_feedback(req: FeedbackRequest, _=Depends(verify_api_key)):
             message_index=req.message_index,
             feedback=req.feedback,
         )
+        # 落地到语义记忆：让智能体在相关话题时能召回“用户的认可/不认可”，从而自我修正
+        if req.feedback in ("like", "dislike") and agent is not None:
+            try:
+                sm = getattr(agent, "semantic_memory", None)
+                if sm is not None:
+                    verb = "认可" if req.feedback == "like" else "不认可"
+                    content = "用户%s的回答" % verb
+                    if req.prompt:
+                        content += "（针对问题：%s）" % req.prompt[:200]
+                    if req.message:
+                        content += "——回答内容：%s" % req.message[:300]
+                    key = "feedback_%s_%d" % (req.feedback, int(time.time() * 1000))
+                    meta = {
+                        "type": "feedback",
+                        "rating": req.feedback,
+                        "session_id": req.session_id,
+                        "message_index": req.message_index,
+                        "space": req.space,
+                        "prompt": req.prompt[:200],
+                        "message": req.message[:500],
+                        "ts": time.time(),
+                    }
+                    sm.save(key, content, "feedback", importance=0.7, metadata=meta)
+            except Exception as _fm_e:
+                logger.warning("feedback memory save failed: %s" % _fm_e)
         return {"status": "ok", "message": "Feedback recorded"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1564,7 +1905,8 @@ _rl_hits = defaultdict(deque)
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     path = request.url.path
-    if path in ("/health", "/metrics", "/") or path.startswith("/static") or path.startswith("/api/health"):
+    # 豁免：健康检查、静态资源、会话管理(用户高频操作)、技能查询
+    if path in ("/health", "/metrics", "/") or path.startswith("/static") or path.startswith("/api/health")        or path.startswith("/api/sessions") or path.startswith("/api/skills") or path.startswith("/api/memory"):
         return await call_next(request)
     client = request.client.host if request.client else "unknown"
     now = time.time()

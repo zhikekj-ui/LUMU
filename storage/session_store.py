@@ -14,13 +14,14 @@ class SessionStore:
     def _session_path(self, session_id: str) -> Path:
         return self.base_dir / f"{session_id}.json"
 
-    def save(self, session_id: str, messages: list[dict], created_at: str = ""):
+    def save(self, session_id: str, messages: list[dict], created_at: str = "", space: str = "work"):
         """Save a session to disk."""
         data = {
             "id": session_id,
             "messages": messages,
             "created_at": created_at or datetime.now(timezone.utc).isoformat(),
             "updated_at": datetime.now(timezone.utc).isoformat(),
+            "space": space,
         }
         self._session_path(session_id).write_text(
             json.dumps(data, ensure_ascii=False, indent=2)

@@ -35,7 +35,9 @@ COMPRESS_THRESHOLD = float(os.getenv('COMPRESS_THRESHOLD', '0.75'))
 HOST = os.getenv('HOST', '0.0.0.0')
 PORT = int(os.getenv('PORT', '8000'))
 API_KEY = os.getenv('API_KEY', '')
-AGENT_BASE_DIR = os.getenv('AGENT_BASE_DIR', '/root')
+# 跨平台默认工作目录：Windows / macOS / Linux 三端通用（~/lumu-workspace）。
+# 仅当环境变量 AGENT_BASE_DIR 完全未设置时生效；设为空字符串时回落到 cwd（与 .env 现状兼容）。
+AGENT_BASE_DIR = os.getenv('AGENT_BASE_DIR', os.path.expanduser('~/lumu-workspace'))
 AGENT_HOME = os.getenv('AGENT_HOME', str(BASE_DIR))
 EMBEDDING_DIM = int(os.getenv('EMBEDDING_DIM', '512'))
 SEMANTIC_SIMILARITY_THRESHOLD = float(os.getenv('SEMANTIC_SIMILARITY_THRESHOLD', '0.15'))
@@ -48,6 +50,35 @@ MCP_SERVERS = os.getenv('MCP_SERVERS', '')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN', '')
 WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', '')
+
+# ── 国内渠道（主战场）配置预留 ──
+# 对标 OpenClaw 多频道网关的国内版：企业微信 / 飞书 / 钉钉。
+# 各平台「填齐必填项即激活」，缺任一必填项则该渠道不启动（不影响其他渠道）。
+# 回调式平台需把回调 URL 配到对应后台：
+#   https://<你的域名或IP>:8000/api/channels/{wecom|feishu|dingtalk}/callback
+# 该 URL 需公网可达 + HTTPS（建议 Nginx 反代终止 TLS）。
+# 跨平台会话延续（默认关；开启后同一用户在任意渠道共享上下文，对标 OpenClaw/Hermes）：
+CROSS_PLATFORM_SESSION = os.getenv('CROSS_PLATFORM_SESSION', 'false').lower() == 'true'
+
+# 企业微信（自建应用）：corpid + secret + agentid 必填；token/aes_key 为回调校验
+WECHAT_WORK_CORP_ID = os.getenv('WECHAT_WORK_CORP_ID', '')
+WECHAT_WORK_AGENT_ID = os.getenv('WECHAT_WORK_AGENT_ID', '')
+WECHAT_WORK_SECRET = os.getenv('WECHAT_WORK_SECRET', '')
+WECHAT_WORK_TOKEN = os.getenv('WECHAT_WORK_TOKEN', '')
+WECHAT_WORK_AES_KEY = os.getenv('WECHAT_WORK_AES_KEY', '')   # 明文模式留空
+
+# 飞书（企业自建应用）
+FEISHU_APP_ID = os.getenv('FEISHU_APP_ID', '')
+FEISHU_APP_SECRET = os.getenv('FEISHU_APP_SECRET', '')
+FEISHU_VERIFY_TOKEN = os.getenv('FEISHU_VERIFY_TOKEN', '')
+FEISHU_ENCRYPT_KEY = os.getenv('FEISHU_ENCRYPT_KEY', '')
+
+# 钉钉（企业内部应用）
+DINGTALK_APP_KEY = os.getenv('DINGTALK_APP_KEY', '')
+DINGTALK_APP_SECRET = os.getenv('DINGTALK_APP_SECRET', '')
+DINGTALK_AGENT_ID = os.getenv('DINGTALK_AGENT_ID', '')
+DINGTALK_TOKEN = os.getenv('DINGTALK_TOKEN', '')
+DINGTALK_AES_KEY = os.getenv('DINGTALK_AES_KEY', '')
 
 # ── 媒体生成（图像/视频）配置接口预留 ──
 # 图像/视频生成属于「模型能力」：框架只统一预留各家厂商的配置接口，

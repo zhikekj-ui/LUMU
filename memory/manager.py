@@ -28,14 +28,19 @@ class MemoryManager:
             conn.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(key, content)
             """)
+            # Space isolation column (idempotent — safe on existing DBs)
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN space TEXT DEFAULT 'work'")
+            except sqlite3.OperationalError:
+                pass
 
-    def save(self, key: str, content: str, category: str = "general"):
+    def save(self, key: str, content: str, category: str = "general", space: str = "work"):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                """INSERT INTO memories (key, content, category)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(key) DO UPDATE SET content=excluded.content, updated_at=datetime('now')""",
-                (key, content, category),
+                """INSERT INTO memories (key, content, category, space)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET content=excluded.content, space=excluded.space, updated_at=datetime('now')""",
+                (key, content, category, space),
             )
             # Update FTS
             conn.execute("DELETE FROM memories_fts WHERE key=?", (key,))
@@ -46,16 +51,24 @@ class MemoryManager:
             row = conn.execute("SELECT content FROM memories WHERE key=?", (key,)).fetchone()
             return row[0] if row else None
 
-    def search(self, query: str, limit: int = 5) -> list[dict]:
+    def search(self, query: str, limit: int = 5, space: str | None = None) -> list[dict]:
         with sqlite3.connect(self.db_path) as conn:
             # Try FTS5 first (works for English/single-word queries)
             try:
-                rows = conn.execute(
-                    """SELECT m.key, m.content, m.category FROM memories_fts f
-                       JOIN memories m ON m.key = f.key
-                       WHERE memories_fts MATCH ? LIMIT ?""",
-                    (query, limit),
-                ).fetchall()
+                if space:
+                    rows = conn.execute(
+                        """SELECT m.key, m.content, m.category FROM memories_fts f
+                           JOIN memories m ON m.key = f.key
+                           WHERE memories_fts MATCH ? AND m.space=? LIMIT ?""",
+                        (query, space, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """SELECT m.key, m.content, m.category FROM memories_fts f
+                           JOIN memories m ON m.key = f.key
+                           WHERE memories_fts MATCH ? LIMIT ?""",
+                        (query, limit),
+                    ).fetchall()
                 if rows:
                     return [{"key": r[0], "content": r[1], "category": r[2]} for r in rows]
             except Exception:
@@ -68,18 +81,20 @@ class MemoryManager:
             results = []
             for term in terms:
                 rows = conn.execute(
-                    """SELECT key, content, category FROM memories
+                    """SELECT key, content, category, space FROM memories
                        WHERE content LIKE ? OR key LIKE ?
                        ORDER BY updated_at DESC""",
                     (f"%{term}%", f"%{term}%"),
                 ).fetchall()
                 for r in rows:
+                    if space and r[3] != space:
+                        continue
                     if r[0] not in seen_keys:
                         seen_keys.add(r[0])
                         results.append({"key": r[0], "content": r[1], "category": r[2]})
             return results[:limit]
 
-    def recall_relevant(self, query: str, top_k: int = 5, category: str | None = None) -> list[dict]:
+    def recall_relevant(self, query: str, top_k: int = 5, category: str | None = None, space: str | None = None) -> list[dict]:
         """Recall memories relevant to the current query.
 
         Uses keyword matching + recency scoring for relevance ranking.
@@ -102,11 +117,13 @@ class MemoryManager:
 
         with sqlite3.connect(self.db_path) as conn:
             all_rows = conn.execute(
-                "SELECT key, content, category, updated_at FROM memories ORDER BY updated_at DESC"
+                "SELECT key, content, category, space, updated_at FROM memories ORDER BY updated_at DESC"
             ).fetchall()
 
         scored = []
-        for key, content_text, cat, updated_at in all_rows:
+        for key, content_text, cat, sp, updated_at in all_rows:
+            if space and sp != space:
+                continue
             if category and cat != category:
                 continue
             content_lower = content_text.lower()
@@ -139,12 +156,22 @@ class MemoryManager:
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:top_k]
 
-    def list_all(self, category: str | None = None) -> list[dict]:
+    def list_all(self, category: str | None = None, space: str | None = None) -> list[dict]:
         with sqlite3.connect(self.db_path) as conn:
-            if category:
+            if category and space:
+                rows = conn.execute(
+                    "SELECT key, content, category, created_at FROM memories WHERE category=? AND space=? ORDER BY updated_at DESC",
+                    (category, space),
+                ).fetchall()
+            elif category:
                 rows = conn.execute(
                     "SELECT key, content, category, created_at FROM memories WHERE category=? ORDER BY updated_at DESC",
                     (category,),
+                ).fetchall()
+            elif space:
+                rows = conn.execute(
+                    "SELECT key, content, category, created_at FROM memories WHERE space=? ORDER BY updated_at DESC",
+                    (space,),
                 ).fetchall()
             else:
                 rows = conn.execute(

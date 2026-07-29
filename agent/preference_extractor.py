@@ -76,6 +76,7 @@ async def extract_preferences_from_conversation(
     client: Any,
     model: str,
     memory_manager: Any,
+    space: str = "work",
 ) -> list[dict] | None:
     """Analyze conversation and extract user preferences.
 
@@ -150,7 +151,7 @@ async def extract_preferences_from_conversation(
             if confidence == "low":
                 full_content = f"[低置信度] {content}"
 
-            memory_manager.save(mem_key, full_content, category="preference")
+            memory_manager.save(mem_key, full_content, category="preference", space=space)
             extracted.append({
                 "key": key,
                 "content": content,

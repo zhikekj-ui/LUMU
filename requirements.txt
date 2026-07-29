@@ -42,3 +42,7 @@ pypdf>=4.0.0
 python-docx>=1.1.0
 jieba>=0.42.1
 python-multipart>=0.0.9
+
+# Browser automation (Playwright — 浏览器工具核心依赖；Docker 镜像内一并安装 Chromium)
+# 版本与开发/演示服务器对齐（1.61.0），保证干净安装也能获得浏览器能力。
+playwright==1.61.0

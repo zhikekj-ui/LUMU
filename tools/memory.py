@@ -89,10 +89,16 @@ def _get_memory_manager():
     return _agent_instance.memory
 
 
-def save_memory(key: str, content: str, category: str = "general") -> str:
+def save_memory(key: str, content: str, category: str = "general", space: str | None = None) -> str:
     try:
         mm = _get_memory_manager()
-        mm.save(key, content, category)
+        # 未显式指定空间时，按当前对话所属空间标注（默认 work）
+        if space is None:
+            try:
+                space = getattr(_agent_instance, "_current_space", "work")
+            except Exception:
+                space = "work"
+        mm.save(key, content, category, space=space)
         return f"Saved memory: [{category}] {key}"
     except Exception as e:
         return f"Error saving memory: {e}"
