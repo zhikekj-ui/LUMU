@@ -689,6 +689,20 @@ class Agent:
                 base_prompt = base_prompt + "\n\n" + _blk
         try:
             _custom = get_system_prompt()
+            # 运行时注入当前底层模型身份：确保 LUMU 永远知道自己此刻真实跑在哪个模型上，
+            # 被问“你是什么模型”时直接回答，不再去瞎猜/调用接口/说“查不到”。
+            try:
+                _prov_disp = getattr(getattr(self, "provider", None), "display_name", "") or self.provider_name
+                _model_identity = (
+                    "\n\n【运行时身份 · 当前模型】\n"
+                    "你此刻真实运行的底层大模型是：「" + str(self.model) + "」（供应商：" + str(_prov_disp) + "）。\n"
+                    "当用户问你“你是什么模型 / 你用的什么模型 / 你的模型是什么 / 你现在是什么模型”时，"
+                    "直接如实回答上述模型名称即可，不要尝试调用任何接口去查询、也不要说“查不到”或“前端下拉框”——"
+                    "它就是 " + str(self.model) + "，这就是答案。"
+                )
+                _custom = (_custom + _model_identity) if _custom else _model_identity
+            except Exception:
+                pass
             _persona = (getattr(self, "SPACE_PROFILES", {}) or {}).get(space, {}).get("persona", "")
             prefix = "\n\n".join([p for p in (_custom, _persona) if p])
             if prefix:
@@ -2397,8 +2411,45 @@ class Agent:
                     fn_args = self._coerce_args(fn_name, tc["function"]["arguments"])
 
                     yield {"type": "tool_start", "tool": fn_name, "args": fn_args}
+
+                    # —— HITL 人工审批前置：推结构化事件 + 真正阻塞等待人工决策 ——
+                    _hitl_ok = True
+                    if (
+                        self._approval_mgr
+                        and self._approval_mgr.should_require_approval(
+                            fn_name,
+                            {"command": fn_args.get("command", ""), "file_path": fn_args.get("file_path", "")},
+                        )
+                        and not self._approval_mgr.session_always_allowed(session.id, fn_name)
+                    ):
+                        _action = self._approval_mgr.request_approval(
+                            session_id=session.id,
+                            tool_name=fn_name,
+                            tool_args=fn_args,
+                            reason="高风险操作，需人工审批（允许 / 拒绝 / 始终允许）",
+                        )
+                        if _action:
+                            yield {
+                                "type": "approval_required",
+                                "action_id": _action.action_id,
+                                "tool": fn_name,
+                                "args": fn_args,
+                                "risk": _action.risk_level,
+                                "reason": _action.reason,
+                            }
+                            _decision = await self._approval_mgr.wait_for_decision(_action.action_id, timeout=300)
+                            if _decision not in ("approved", "always"):
+                                _hitl_ok = False
+
+                    if not _hitl_ok:
+                        result = "⛔ 操作已被人工拒绝（或超时自动否决），未执行。"
+                        tool_results_all.append({"tool": fn_name, "args": fn_args, "result": result})
+                        yield {"type": "tool_result", "tool": fn_name, "result": result}
+                        messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                        continue
+
                     try:
-                        result = await self._execute_tool_enhanced(fn_name, fn_args, session_id=session.id)
+                        result = await self._execute_tool_enhanced(fn_name, fn_args, session_id=session.id, skip_approval=True)
                     except Exception as _te:
                         _log("[stable] tool exec error (%s): %s" % (fn_name, _te))
                         result = "Error: 工具 %s 执行异常: %s" % (fn_name, _te)
@@ -2531,7 +2582,7 @@ class Agent:
 
     # --- v3: Enhanced tool execution with all subsystems ---
 
-    async def _execute_tool_enhanced(self, fn_name: str, fn_args: dict, session_id: str = "") -> str:
+    async def _execute_tool_enhanced(self, fn_name: str, fn_args: dict, session_id: str = "", skip_approval: bool = False) -> str:
         """Execute a tool with full v3 subsystem integration."""
         import time
 
@@ -2547,7 +2598,7 @@ class Agent:
                 pass
 
         # 2. HITL approval check — 真拦截：高风险操作挂起等待人工审批，默认不执行
-        if self._approval_mgr:
+        if self._approval_mgr and not skip_approval:
             try:
                 call_args = {"command": fn_args.get("command", ""), "file_path": fn_args.get("file_path", "")}
                 if self._approval_mgr.should_require_approval(fn_name, call_args):
