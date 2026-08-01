@@ -700,7 +700,35 @@ class Agent:
                     "直接如实回答上述模型名称即可，不要尝试调用任何接口去查询、也不要说“查不到”或“前端下拉框”——"
                     "它就是 " + str(self.model) + "，这就是答案。"
                 )
-                _custom = (_custom + _model_identity) if _custom else _model_identity
+                # 运行时注入：内置能力域（toolset）+ 已加载技能，让 LUMU 知道自己有“手脚”，
+                # 被问“你能做什么 / 你有什么能力 / 你会哪些工具”时直接基于清单第一人称介绍，不再瞎猜接口。
+                try:
+                    _ts = self.tools.list_toolsets()
+                    _domain_count = len(_ts)
+                    _tool_count = sum(len(v) for v in _ts.values())
+                    _caps = "\n".join(f"- {k}：{len(v)} 个工具" for k, v in _ts.items())
+                except Exception:
+                    _domain_count = 0
+                    _tool_count = 0
+                    _caps = ""
+                try:
+                    _sk = self.skills.list_all() if (hasattr(self, "skills") and self.skills) else []
+                    _skill_names = [
+                        (s.get("name") if isinstance(s, dict) else getattr(s, "name", str(s)))
+                        for s in _sk
+                    ]
+                    _skill_line = ("当前已加载技能：" + "、".join([str(n) for n in _skill_names])) if _skill_names else "当前暂未加载额外技能"
+                except Exception:
+                    _skill_line = "当前暂未加载额外技能"
+                _cap_identity = (
+                    "\n\n【运行时身份 · 你的能力（手脚）】\n"
+                    f"你共内置 {_domain_count} 个能力域、约 {_tool_count} 个工具，它们是你的手脚与感官：\n"
+                    + (_caps + "\n" if _caps else "")
+                    + _skill_line + "\n"
+                    "当用户问“你能做什么 / 你有什么能力 / 你会哪些工具”时，直接基于上述清单以第一人称介绍即可，"
+                    "不要调用任何接口去查询、也不要说“查不到”——这些都是你本体自带的能力。"
+                )
+                _custom = (_custom + _model_identity + _cap_identity) if _custom else (_model_identity + _cap_identity)
             except Exception:
                 pass
             _persona = (getattr(self, "SPACE_PROFILES", {}) or {}).get(space, {}).get("persona", "")
