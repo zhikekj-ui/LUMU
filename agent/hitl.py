@@ -204,6 +204,7 @@ class ApprovalManager:
         # In-memory pending actions for fast lookup
         self._pending: dict[str, PendingAction] = {}
         self._load_pending()
+        self._session_always_allow: dict[str, set] = {}
         _logger.info(f"[hitl] ApprovalManager initialized (approval required for: {', '.join(r.value for r in self._require_approval)})")
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -316,6 +317,29 @@ class ApprovalManager:
         self._update_action(action)
         self._log_event(action_id, "denied", reason)
         return True
+
+    # --- Session 级「始终允许」（仅作用于当前会话；新会话=新 session_id 自动失效）---
+    def session_always_allowed(self, session_id: str, tool_name: str) -> bool:
+        return tool_name in self._session_always_allow.get(session_id, set())
+
+    def add_session_always_allow(self, session_id: str, tool_name: str) -> None:
+        self._session_always_allow.setdefault(session_id, set()).add(tool_name)
+
+    def wait_for_decision(self, action_id: str, timeout: float = 300) -> str:
+        """阻塞等待人工决策；返回 'approved' | 'denied' | 'timeout'。超时自动否决。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            st = self.get_status(action_id)
+            if st is None:
+                return "timeout"
+            status = st.get("status")
+            if status == "approved":
+                return "approved"
+            if status in ("denied", "timeout"):
+                return status
+            time.sleep(1.0)
+        self.deny(action_id, reason="超时自动否决")
+        return "timeout"
 
     def get_pending(self, session_id: Optional[str] = None) -> list[dict]:
         """Get pending actions, optionally filtered by session."""

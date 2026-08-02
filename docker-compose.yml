@@ -1,7 +1,60 @@
-version: "3.8"
+# LUMU —— 个人智能体，一条命令跑起来
+#
+#   docker compose up -d
+#   docker compose logs -f agent      # 从日志里复制带口令的访问链接
+#
+# 默认是「单容器 + SQLite」的个人模式，不需要数据库，不需要 Redis。
+# 需要 Postgres / Redis 的重型部署见文件末尾的 scale 配置段。
 
 services:
+  agent:
+    build: .
+    image: lumu:latest
+    container_name: lumu-agent
+
+    # 只映射到宿主机环回地址：默认只有这台机器能访问。
+    # 想让局域网其他设备访问，改成 "38473:38473"，
+    # 此时务必确认你已经理解 SECURITY.md 中的风险说明。
+    ports:
+      - "127.0.0.1:38473:38473"
+
+    environment:
+      # 容器内必须绑 0.0.0.0，端口边界由上面的 ports 控制
+      HOST: "0.0.0.0"
+      PORT: "38473"
+      LOG_LEVEL: "INFO"
+      # 想用固定口令（省去每次翻日志），取消下一行注释并改成你自己的随机串
+      # LUMU_TOKEN: "change-me-to-a-long-random-string"
+
+    # .env 可选：没有也能启动，模型 Key 可以在 Web 界面里配。
+    # 若你已创建 .env，取消下面两行注释即可自动加载。
+    # env_file:
+    #   - .env
+
+    volumes:
+      # 你的全部数据（对话、记忆、知识库、配置）都在这里，删容器不丢
+      - ./data:/app/data
+      # 自写技能包：放进去即热加载生效
+      - ./skills/packs:/app/skills/packs
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:38473/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+# ─────────────────────────────────────────────────────────────
+# 可选：重型部署（多人共用 / 高并发）
+# 启用方式：docker compose --profile scale up -d
+# 并在 agent 服务的 environment 中加上：
+#   DATABASE_URL: postgresql+asyncpg://lumu:lumu@postgres:5432/lumu_agent
+#   REDIS_URL: redis://redis:6379/0
+# ─────────────────────────────────────────────────────────────
   postgres:
+    profiles: ["scale"]
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: lumu
@@ -17,6 +70,7 @@ services:
     restart: unless-stopped
 
   redis:
+    profiles: ["scale"]
     image: redis:7-alpine
     volumes:
       - redisdata:/data
@@ -26,31 +80,6 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
-
-  agent:
-    build: .
-    ports:
-      - "8000:8000"
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql+asyncpg://lumu:lumu@postgres:5432/lumu_agent
-      REDIS_URL: redis://redis:6379/0
-    volumes:
-      - ./data:/app/data
-      - ./.env:/app/.env:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
 
 volumes:
   pgdata:

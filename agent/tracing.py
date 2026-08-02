@@ -303,6 +303,31 @@ class TraceManager:
             ).fetchone()
         return dict(row) if row else {}
 
+    def get_cost_by_day(self, days: int = 400) -> list[dict]:
+        """按天聚合 token 用量与 LLM 调用次数（用于仪表盘波形图）。"""
+        cutoff = time.time() - (days * 86400)
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT DATE(started_at, 'unixepoch') as d,
+                          SUM(token_prompt) as prompt,
+                          SUM(token_completion) as completion,
+                          ROUND(SUM(cost_usd), 6) as cost,
+                          SUM(CASE WHEN span_type='llm_call' THEN 1 ELSE 0 END) as llm_calls
+                   FROM spans
+                   WHERE started_at > ?
+                   GROUP BY d
+                   ORDER BY d""",
+                (cutoff,),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            prompt = d.get("prompt") or 0
+            completion = d.get("completion") or 0
+            d["total"] = prompt + completion
+            out.append(d)
+        return out
+
     def get_tool_stats(self, hours: int = 24) -> list[dict]:
         """Get per-tool usage statistics."""
         cutoff = time.time() - (hours * 3600)

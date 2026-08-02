@@ -14,12 +14,13 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Header, Depends, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Header, Depends, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from agent.core import Agent
+from agent.tracing import get_tracer
 from tools.registry import ToolRegistry
 from providers.registry import discover_providers
 from plugins.loader import PluginLoader
@@ -117,8 +118,8 @@ STATIC_DIR = Path(__file__).parent / "static"
 async def health():
     return {
         "status": "ok",
-        "provider": config.DEFAULT_PROVIDER,
-        "model": config.DEFAULT_MODEL,
+        "provider": getattr(agent, "provider_name", config.DEFAULT_PROVIDER),
+        "model": getattr(agent, "model", config.DEFAULT_MODEL),
         "tools_loaded": len(getattr(tool_registry, "_tools", {})),
     }
 
@@ -170,16 +171,23 @@ async def metrics():
 # --- Auth ---
 logger_auth = get_logger("auth")
 
-async def verify_api_key(authorization: str = Header(default="")):
-    """Validate Bearer token. Skipped if API_KEY is not set."""
-    if not config.API_KEY:
-        return
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing Bearer token")
-    token = authorization[7:]
-    if token != config.API_KEY:
-        logger_auth.warning("invalid_api_key_attempt", token_prefix=token[:8] if token else None)
-        raise HTTPException(status_code=403, detail="Invalid API key")
+async def verify_api_key(request: Request, authorization: str = Header(default="")):
+    """访问守卫：本机直连零鉴权；对外暴露时需要一次性访问口令。
+
+    策略实现见 core/access_guard —— 安全跟着「暴露面」走，不跟着「用户身份」走。
+    个人智能体不需要账号体系：本机使用完全无感，只有当实例可被外部访问时
+    （绑定非环回地址 / 经反向代理 / LUMU_PUBLIC=1）才要求口令。
+    """
+    from core.access_guard import check as _guard_check, request_is_exposed
+    try:
+        _guard_check(request, authorization)
+    except HTTPException:
+        try:
+            if request_is_exposed(request):
+                logger_auth.warning("unauthorized_request", path=str(request.url.path))
+        except Exception:
+            pass
+        raise
 
 
 # --- Request models ---
@@ -189,6 +197,10 @@ class ChatRequest(BaseModel):
     images: list[str] | None = None  # v8: base64 or URL images
     files: list[dict] | None = None  # 通用文件附件：[{name, mime, data(base64)}]
     space: str = "work"  # 空间隔离：work / personal
+    # —— 对话级模型/参数覆盖（可选，仅对本轮对话临时生效，不持久化、不影响全局配置）——
+    provider: str | None = None  # 覆盖供应商（如 anthropic / openai）
+    model: str | None = None     # 覆盖具体模型（如 claude-3-5-sonnet-20241022）
+    temperature: float | None = None  # 覆盖采样温度
 
 
 class MemoryRequest(BaseModel):
@@ -199,11 +211,6 @@ class MemoryRequest(BaseModel):
     importance: float = None
     metadata: dict = None
     store: str = "primary"  # primary=MemoryManager / semantic=SemanticMemory
-
-
-class LoginRequest(BaseModel):
-    email: str
-    password: str
 
 
 # --- Routes ---
@@ -233,14 +240,62 @@ async def chat(req: ChatRequest, request: Request, _=Depends(verify_api_key)):
 @limiter.limit("20/minute")
 @app.post("/api/chat/stream")
 async def chat_stream(req: ChatRequest, request: Request, _=Depends(verify_api_key)):
-    """SSE streaming endpoint — yields tokens as they arrive."""
+    """SSE streaming endpoint — yields tokens as they arrive.
+    支持对话级模型/参数覆盖：req.provider / req.model / req.temperature 仅对本轮临时生效，不影响全局 model_preference。
+    """
 
     async def event_generator():
-        try:
-            async for event in agent.stream_chat(req.message, req.session_id, images=req.images, files=req.files, space=req.space):
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
+        from tools.file_hub import flush_session_files, _CUR_SESSION
+        from providers.registry import get as _get_provider
+        from agent.context import ContextEngine
+        sid = req.session_id or "__default__"
+        _CUR_SESSION.set(sid)
+        # —— 对话级模型/参数覆盖（临时切换，整轮流结束后还原）——
+        _restore = None
+        async with agent._chat_lock:
+            if req.provider or req.model or req.temperature is not None:
+                try:
+                    _orig = (
+                        agent.provider_name,
+                        agent.provider,
+                        agent.model,
+                        getattr(agent, "_override_temperature", None),
+                        agent.context,
+                    )
+                    if req.provider and req.provider != agent.provider_name:
+                        _p = _get_provider(req.provider)
+                        if not _p:
+                            raise ValueError(f"供应商 '{req.provider}' 不存在")
+                        agent.provider_name = req.provider
+                        agent.provider = _p
+                        agent.context = ContextEngine(context_window=_p.context_window)
+                    if req.model:
+                        agent.model = req.model
+                    if req.temperature is not None:
+                        agent._override_temperature = req.temperature
+                    _restore = _orig
+                except Exception as _e:
+                    # 覆盖失败则回退到全局模型，不阻塞对话
+                    yield f"data: {json.dumps({'type': 'error', 'content': '模型切换失败：' + str(_e)}, ensure_ascii=False)}\n\n"
+            try:
+                async for event in agent.stream_chat(req.message, req.session_id, images=req.images, files=req.files, space=req.space):
+                    if event.get("type") == "done":
+                        for _fe in flush_session_files(sid):
+                            yield f"data: {json.dumps(_fe, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
+            finally:
+                if _restore:
+                    (
+                        agent.provider_name,
+                        agent.provider,
+                        agent.model,
+                        agent._override_temperature,
+                        agent.context,
+                    ) = _restore
+            for _fe in flush_session_files(sid):
+                yield f"data: {json.dumps(_fe, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -301,15 +356,9 @@ async def create_session(space: str = "work", _=Depends(verify_api_key)):
     return {"id": session.id, "preview": "", "message_count": 0, "space": session.space}
 
 
-@app.post("/api/auth/login")
-async def auth_login(req: LoginRequest, request: Request):
-    """Authenticate admin user and return a session token."""
-    admin_email = os.getenv("ADMIN_EMAIL", "zhikexx@163.com")
-    admin_password = os.getenv("ADMIN_PASSWORD", "mm369369")
-    if req.email == admin_email and req.password == admin_password:
-        token = config.API_KEY or "lumu-session-token"
-        return {"access_token": token, "user": {"email": req.email, "role": "super_admin"}}
-    raise HTTPException(status_code=401, detail="邮箱或密码错误")
+# 说明：原 /api/auth/login 已移除。
+# LUMU 是个人智能体，不设账号体系；访问控制由 core/access_guard 按「暴露面」决定，
+# 详见 verify_api_key。该端点此前还内联了开发者凭据默认值，一并清除。
 
 
 # --- Memory ---
@@ -381,6 +430,37 @@ async def delete_memory(key: str, _=Depends(verify_api_key)):
     """Delete a memory by key."""
     agent.memory.delete(key)
     return {"ok": True, "key": key}
+
+
+@app.delete("/api/memory/space/{space}")
+async def clear_memory_space(space: str, _=Depends(verify_api_key)):
+    """清空指定 space 的全部记忆（primary + semantic），用于用户侧隐私重置。"""
+    n_primary = 0
+    try:
+        for it in (agent.memory.list_all(None, space) or []):
+            k = it.get("key") if isinstance(it, dict) else None
+            if k:
+                try:
+                    agent.memory.delete(k)
+                    n_primary += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    n_semantic = 0
+    try:
+        if agent.semantic_memory is not None:
+            for it in (agent.semantic_memory.list_all(space=space) or []):
+                k = it.get("key") if isinstance(it, dict) else None
+                if k:
+                    try:
+                        agent.semantic_memory.delete(k)
+                        n_semantic += 1
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return {"ok": True, "space": space, "primary_deleted": n_primary, "semantic_deleted": n_semantic}
 
 
 @app.get("/api/memory/search")
@@ -837,6 +917,7 @@ async def delete_cron_job(job_id: str, _=Depends(verify_api_key)):
 class ApprovalActionRequest(BaseModel):
     feedback: str = ""
     reason: str = ""
+    scope: str = "once"  # once | session
 
 
 @app.get("/api/approvals")
@@ -850,7 +931,14 @@ async def list_pending_approvals(_=Depends(verify_api_key)):
 async def approve_action(action_id: str, req: ApprovalActionRequest = None, _=Depends(verify_api_key)):
     """人工批准挂起操作并立即执行（唯一合法的批准通道）。"""
     from tools.hitl_tools import approve_and_execute
+    from agent.hitl import get_approval_manager
     feedback = req.feedback if req else ""
+    scope = (req.scope if req else "once") or "once"
+    if scope == "session":
+        _mgr = get_approval_manager()
+        _act = _mgr.get_status(action_id)
+        if _act:
+            _mgr.add_session_always_allow(_act.get("session_id"), _act.get("tool_name"))
     result = await approve_and_execute(action_id, feedback=feedback)
     ok = result.startswith("✅") or result.startswith("已批准")
     if not ok:
@@ -951,6 +1039,10 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # 导致 lumu 进程无法进入目录读取 JS/CSS -> Starlette 抛 PermissionError -> 静态资源 401 -> 前端白屏
 os.makedirs(str(STATIC_DIR / "assets"), mode=0o755, exist_ok=True)
 app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
+# 官方 dashboard 块引用 /avatars/*（nav-user 默认头像）
+os.makedirs(str(STATIC_DIR / "avatars"), mode=0o755, exist_ok=True)
+app.mount("/avatars", StaticFiles(directory=str(STATIC_DIR / "avatars")), name="avatars")
+
 
 
 @app.get("/favicon.svg", include_in_schema=False)
@@ -980,6 +1072,13 @@ from providers.registry import list_providers
 class ProviderKeyRequest(BaseModel):
     api_key: str
 
+
+class TTSSynthesizeRequest(BaseModel):
+    text: str
+    voice: str | None = None
+    provider: str | None = None
+    rate: str | None = None
+    pitch: str | None = None
 
 class TTSConfigRequest(BaseModel):
     provider: str | None = None
@@ -1112,6 +1211,79 @@ async def update_tts_configuration(req: TTSConfigRequest, _=Depends(verify_api_k
     """Update TTS configuration."""
     set_tts_config(provider=req.provider, mimo_api_key=req.mimo_api_key)
     return {"ok": True, "message": "TTS 配置已更新"}
+
+
+@app.post("/api/tts/synthesize")
+async def tts_synthesize(req: TTSSynthesizeRequest, _=Depends(verify_api_key)):
+    """合成文本为语音，返回 base64 音频供前端直接播放（避开 audio 标签无鉴权头难题）。"""
+    from tools.tts_stt import handle_tts_synthesize
+    import base64, os
+    kwargs = {"text": req.text}
+    if req.voice:
+        kwargs["voice"] = req.voice
+    if req.provider:
+        kwargs["provider"] = req.provider
+    if req.rate:
+        kwargs["rate"] = req.rate
+    if req.pitch:
+        kwargs["pitch"] = req.pitch
+    res = handle_tts_synthesize(**kwargs)
+    if "error" in res:
+        raise HTTPException(status_code=400, detail=res["error"])
+    fp = res.get("filepath")
+    if not fp or not os.path.exists(fp):
+        raise HTTPException(status_code=500, detail="音频文件生成失败")
+    with open(fp, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    return {"ok": True, "audio_base64": b64, "voice": res.get("voice"), "provider": res.get("provider"), "format": "mp3"}
+
+
+@app.get("/tts-demo")
+async def tts_demo_page():
+    from fastapi.responses import FileResponse
+    return FileResponse("/opt/agent-framework/api/tts_demo.html", media_type="text/html")
+
+
+# --- 语音输入（STT）---
+@app.post("/api/stt/transcribe")
+async def stt_transcribe_api(
+    audio: UploadFile = File(...),
+    language: str = Form("zh"),
+    _=Depends(verify_api_key),
+):
+    """浏览器录音 → 文本。本地 faster-whisper 推理，音频不出服务器。"""
+    import os as _os, tempfile as _tf
+    from starlette.concurrency import run_in_threadpool
+    data = await audio.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="空音频")
+    if len(data) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="音频过大（上限 25MB）")
+    ext = _os.path.splitext(audio.filename or "")[1] or ".webm"
+    fd, tmp = _tf.mkstemp(suffix=ext); _os.close(fd)
+    with open(tmp, "wb") as fh:
+        fh.write(data)
+    try:
+        from tools import stt_local
+        if not stt_local.is_available():
+            raise HTTPException(status_code=503, detail="语音识别引擎未安装（faster-whisper）")
+        res = await run_in_threadpool(stt_local.transcribe, tmp, language)
+        if not res.get("ok"):
+            raise HTTPException(status_code=500, detail=res.get("error", "识别失败"))
+        return res
+    finally:
+        try:
+            _os.remove(tmp)
+        except Exception:
+            pass
+
+
+@app.get("/api/stt/status")
+async def stt_status_api():
+    """语音识别可用性探测，供前端决定是否显示麦克风按钮。"""
+    from tools import stt_local
+    return {"available": stt_local.is_available(), "model": stt_local.MODEL_SIZE,
+            "provider": "local_faster_whisper"}
 
 
 @app.get("/api/config/stt")
@@ -1893,6 +2065,220 @@ async def submit_feedback(req: FeedbackRequest, _=Depends(verify_api_key)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# --- 结构化产品反馈（个人市场反馈闭环，供 B 端决策）---
+import os as _fb_os
+import sqlite3 as _fb_sqlite
+
+
+def _feedback_db():
+    _base = _fb_os.path.dirname(_fb_os.path.dirname(_fb_os.path.abspath(__file__)))
+    _db = _fb_os.path.join(_base, "data", "feedback.db")
+    _c = _fb_sqlite.connect(_db)
+    _c.execute(
+        """CREATE TABLE IF NOT EXISTS feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT DEFAULT (datetime('now')),
+            category TEXT DEFAULT 'suggest',   -- suggest | bug | praise | question
+            rating INTEGER DEFAULT 0,          -- 1-5 星
+            content TEXT NOT NULL,
+            feature TEXT DEFAULT '',
+            page TEXT DEFAULT '',
+            contact TEXT DEFAULT '',
+            user_agent TEXT DEFAULT '',
+            status TEXT DEFAULT 'new'          -- new | reviewed | resolved
+        )"""
+    )
+    _c.commit()
+    return _c
+
+
+class ProductFeedbackRequest(BaseModel):
+    category: str = "suggest"   # suggest | bug | praise | question
+    rating: int = 0             # 1-5 星
+    content: str                # 必填
+    feature: str = ""
+    page: str = ""
+    contact: str = ""
+
+
+@app.post("/api/feedback/submit")
+async def submit_product_feedback(req: ProductFeedbackRequest, request: Request):
+    """公开的产品级反馈入口（个人用户无需密钥）。落结构化库，供后续分析做 B 端决策。"""
+    content = (req.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content required")
+    if req.rating < 0 or req.rating > 5:
+        raise HTTPException(status_code=400, detail="rating must be 0-5")
+    try:
+        c = _feedback_db()
+        c.execute(
+            "INSERT INTO feedback (category, rating, content, feature, page, contact, user_agent) VALUES (?,?,?,?,?,?,?)",
+            (req.category, req.rating, content[:2000], req.feature[:80], req.page[:120],
+             req.contact[:120], (request.headers.get("user-agent") or "")[:200]),
+        )
+        c.commit(); c.close()
+        return {"status": "ok", "message": "感谢反馈，我们已收到"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/feedback/admin")
+async def list_feedback(category: str = "", status: str = "", limit: int = 100, _=Depends(verify_api_key)):
+    """后台查看已收集反馈（受 API key 保护）。"""
+    try:
+        c = _feedback_db()
+        sql = "SELECT id, ts, category, rating, content, feature, page, contact, status FROM feedback"
+        clauses, params = [], []
+        if category:
+            clauses.append("category=?"); params.append(category)
+        if status:
+            clauses.append("status=?"); params.append(status)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(min(max(limit, 1), 500))
+        rows = c.execute(sql, params).fetchall()
+        c.close()
+        cols = ["id", "ts", "category", "rating", "content", "feature", "page", "contact", "status"]
+        return {"total": len(rows), "items": [dict(zip(cols, r)) for r in rows]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===== 渠道接入配置（WebUI 设置页 → 个人市场切入点）=====
+# 各渠道适配器在 channels/ 已实现，配置经 data/channels.json 持久化、路由工厂优先读取。
+CHANNEL_DEFS = [
+    {
+        "key": "telegram", "name": "Telegram", "desc": "机器人渠道，填 Bot Token 即可启用。",
+        "doc": "向 @BotFather 申请 Bot 后取 Token 填入。",
+        "fields": [{"key": "TELEGRAM_BOT_TOKEN", "label": "Bot Token", "secret": True}],
+    },
+    {
+        "key": "discord", "name": "Discord", "desc": "服务器机器人渠道。",
+        "doc": "开发者后台创建应用→Bot→复制 Token。",
+        "fields": [{"key": "DISCORD_BOT_TOKEN", "label": "Bot Token", "secret": True}],
+    },
+    {
+        "key": "webhook", "name": "Webhook", "desc": "始终可用，第三方系统可 POST 调用。",
+        "doc": "向 /api/webhook/{name} 发送 JSON {text,user_id,chat_id}。",
+        "fields": [{"key": "WEBHOOK_SECRET", "label": "回调密钥（可选）", "secret": True}],
+    },
+    {
+        "key": "wecom", "name": "企业微信", "desc": "国内主战场：企业自建应用。",
+        "doc": "后台填 corp_id/agent_id/secret；回调 URL 配到企微后台。",
+        "fields": [
+            {"key": "WECHAT_WORK_CORP_ID", "label": "Corp ID", "secret": False},
+            {"key": "WECHAT_WORK_AGENT_ID", "label": "Agent ID", "secret": False},
+            {"key": "WECHAT_WORK_SECRET", "label": "Secret", "secret": True},
+            {"key": "WECHAT_WORK_TOKEN", "label": "回调 Token（可选）", "secret": True},
+            {"key": "WECHAT_WORK_AES_KEY", "label": "AES Key（可选）", "secret": True},
+        ],
+    },
+    {
+        "key": "feishu", "name": "飞书", "desc": "国内主战场：企业自建应用。",
+        "doc": "开发者后台创建应用，取 App ID/App Secret；回调 URL 配到飞书后台。",
+        "fields": [
+            {"key": "FEISHU_APP_ID", "label": "App ID", "secret": False},
+            {"key": "FEISHU_APP_SECRET", "label": "App Secret", "secret": True},
+            {"key": "FEISHU_VERIFY_TOKEN", "label": "Verify Token（可选）", "secret": True},
+            {"key": "FEISHU_ENCRYPT_KEY", "label": "Encrypt Key（可选）", "secret": True},
+        ],
+    },
+    {
+        "key": "dingtalk", "name": "钉钉", "desc": "国内主战场：企业内部应用。",
+        "doc": "开发者后台创建应用，取 AppKey/AppSecret；回调 URL 配到钉钉后台。",
+        "fields": [
+            {"key": "DINGTALK_APP_KEY", "label": "App Key", "secret": False},
+            {"key": "DINGTALK_APP_SECRET", "label": "App Secret", "secret": True},
+            {"key": "DINGTALK_AGENT_ID", "label": "Agent ID", "secret": False},
+            {"key": "DINGTALK_TOKEN", "label": "回调 Token（可选）", "secret": True},
+            {"key": "DINGTALK_AES_KEY", "label": "AES Key（可选）", "secret": True},
+        ],
+    },
+]
+
+
+@app.get("/api/config/channels")
+async def get_channels_config(_=Depends(verify_api_key)):
+    """返回各渠道配置（密钥掩码）与运行态启用情况。"""
+    try:
+        cfg = config.load_channels_config()
+        enabled = set()
+        try:
+            from channels.router import channel_router
+            enabled = {c["name"] for c in channel_router.get_status() if c.get("enabled")}
+        except Exception:
+            pass
+        out = []
+        for ch in CHANNEL_DEFS:
+            saved = cfg.get(ch["key"], {}) or {}
+            fields = []
+            for f in ch["fields"]:
+                raw = saved.get(f["key"]) or getattr(config, f["key"], "")
+                is_set = bool(raw)
+                fields.append({
+                    "key": f["key"],
+                    "label": f["label"],
+                    "secret": f["secret"],
+                    "set": is_set,
+                    # 密钥不回传明文；非密钥回传真实值便于查看/微调
+                    "value": "••••••••" if (f["secret"] and is_set) else (raw if not f["secret"] else ""),
+                })
+            out.append({
+                "key": ch["key"],
+                "name": ch["name"],
+                "desc": ch["desc"],
+                "doc": ch["doc"],
+                "enabled": ch["key"] in enabled,
+                "fields": fields,
+            })
+        return {"channels": out}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/config/channels")
+async def save_channels_config_endpoint(payload: dict, _=Depends(verify_api_key)):
+    """保存渠道配置（合并写入 data/channels.json，并热重载路由）。"""
+    try:
+        incoming = payload.get("channels", {})
+        if not isinstance(incoming, dict):
+            raise HTTPException(status_code=422, detail="channels 必须为对象")
+        existing = config.load_channels_config()
+        for k, v in incoming.items():
+            if not isinstance(v, dict):
+                continue
+            # 仅保留非空字段；空字符串视为「不修改/清空」
+            cleaned = {fk: fv for fk, fv in v.items() if fv not in (None, "")}
+            if cleaned:
+                existing[k] = {**existing.get(k, {}), **cleaned}
+            elif k in existing:
+                existing.pop(k, None)
+        config.save_channels_config(existing)
+        # 热重载：停掉旧渠道、按新配置重启（无需整进程重启）
+        try:
+            from channels.router import channel_router
+            await channel_router.reload()
+        except Exception as e:
+            print(f"[channels] reload skipped: {e}")
+        return {"status": "ok", "saved": list(incoming.keys())}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/channels/reload")
+async def reload_channels(_=Depends(verify_api_key)):
+    """手动热重载渠道（改完回调/Token 后触发）。"""
+    try:
+        from channels.router import channel_router
+        await channel_router.reload()
+        return {"status": "ok", "active": [c["name"] for c in channel_router.get_status() if c.get("enabled")]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 # --- 自定义轻量限流中间件（兜底全端点；slowapi 装饰器在该环境未触发）---
 import time
@@ -1963,3 +2349,116 @@ async def set_provider_base_url(provider_name: str, req: ProviderBaseUrlRequest,
     url = (req.base_url or "").strip()
     set_provider_override(provider_name, {"base_url": url} if url else {})
     return {"ok": True, "provider": provider_name, "base_url": p.resolve_base_url()}
+
+
+@app.get("/api/files/{file_id}")
+async def get_file(file_id: str, _=Depends(verify_api_key)):
+    from tools.file_hub import get_file_meta
+    from fastapi.responses import FileResponse
+    meta = get_file_meta(file_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(meta["path"], media_type=meta["mime"], filename=meta["name"])
+
+
+# --- STT 模型后台预热 ---
+@app.on_event("startup")
+async def _lumu_stt_warmup():
+    import threading
+    def _w():
+        try:
+            from tools import stt_local
+            if stt_local.is_available():
+                stt_local.warmup()
+        except Exception:
+            pass
+    threading.Thread(target=_w, daemon=True).start()
+
+
+@app.get("/api/usage")
+async def api_usage(hours: int = 0, _=Depends(verify_api_key)):
+    """返回真实 token 用量汇总与按天分布（来自 tracing 记录，绝不编造）。"""
+    tm = get_tracer()
+    h = hours if hours and hours > 0 else 24 * 400
+    summary = tm.get_cost_summary(h) or {}
+    by_day = tm.get_cost_by_day(400)
+    return {"summary": summary, "by_day": by_day}
+
+
+# ── Capability introspection (appended by patch) ──
+import os
+@app.get("/api/capabilities")
+async def api_capabilities(_=Depends(verify_api_key)):
+    """Live capability manifest: tools, toolsets, skill packs, saved skills,
+    configured providers/models, exposure policy, and backend API routes.
+    Lets external clients (and the WebUI) see the agent's full surface."""
+    try:
+        tools = [t.name for t in agent.tools.list_tools()]
+        toolsets = agent.tools.list_toolsets()
+        from skills.skill_packs import scan_packs
+        packs = [
+            {"name": p.get("name"), "description": p.get("description"),
+             "always": p.get("always"), "triggers": p.get("triggers")}
+            for p in scan_packs()
+        ]
+        saved = agent.skills.list_all()
+        from core.user_config import load_config
+        cfg = load_config()
+        providers = {
+            pid: {"configured": bool(pc.get("api_key")),
+                  "enabled_models": pc.get("enabled_models", [])}
+            for pid, pc in (cfg.get("providers") or {}).items()
+        }
+        from tools.exposure import exposure_policy
+        policy = exposure_policy()
+        routes = sorted({getattr(r, "path", "") for r in app.routes if getattr(r, "path", "")})
+        return {
+            "ok": True,
+            "agent_home": os.getenv("AGENT_HOME", "/opt/agent-framework"),
+            "tool_count": len(tools),
+            "tools": tools,
+            "toolsets": toolsets,
+            "skill_packs": packs,
+            "saved_skills": saved,
+            "providers": providers,
+            "exposure_policy": policy,
+            "api_routes": routes,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ── 访问守卫中间件：让「点一次带 token 的链接」真正生效 ──────────────
+@app.middleware("http")
+async def lumu_access_middleware(request: Request, call_next):
+    """辅助层，不承担放行/拒绝职责（那是 verify_api_key 的事）。
+
+    - 带正确 ?token= 访问 → 种下 cookie，此后同源请求（含 <img>、EventSource）自动携带
+    - 对外暴露且未授权打开首页 → 返回引导页，而不是让前端满屏 401
+    """
+    try:
+        from core.access_guard import (
+            auth_disabled, request_is_exposed, token_matches, unauthorized_page,
+        )
+    except Exception:
+        return await call_next(request)
+
+    plant = None
+    try:
+        if not auth_disabled() and request_is_exposed(request):
+            ok = token_matches(request, request.headers.get("authorization", ""))
+            if ok and request.query_params.get("token"):
+                plant = request.query_params.get("token")
+            if not ok and request.url.path == "/":
+                return HTMLResponse(unauthorized_page(), status_code=401)
+    except Exception:
+        pass
+
+    response = await call_next(request)
+
+    if plant:
+        response.set_cookie(
+            "lumu_token", plant,
+            max_age=31536000, httponly=True, samesite="lax", path="/",
+        )
+    return response

@@ -347,7 +347,19 @@ def handle_stt_transcribe(**kwargs):
     """
     audio_file = kwargs.get("audio_file", "")
     language = kwargs.get("language", "zh")
-    provider = kwargs.get("provider", "whisper")
+    provider = kwargs.get("provider", "local")
+
+    # 本地引擎优先：随框架自带、无需密钥、音频不出服务器
+    if provider in ("local", "faster-whisper", "whisper_local"):
+        try:
+            from tools import stt_local
+            if stt_local.is_available():
+                r = stt_local.transcribe(audio_file, language)
+                if r.get("ok"):
+                    return r
+        except Exception:
+            pass
+        provider = "whisper"  # 本地不可用则回落云端
 
     if not audio_file:
         return {"error": "Audio file path required"}

@@ -32,8 +32,8 @@ VISION_MODEL = os.getenv('VISION_MODEL', 'step-1.5v-mini')
 VISION_FALLBACK = os.getenv('VISION_FALLBACK', 'step-1v-8k')
 CONTEXT_WINDOW = int(os.getenv('CONTEXT_WINDOW', '128000'))
 COMPRESS_THRESHOLD = float(os.getenv('COMPRESS_THRESHOLD', '0.75'))
-HOST = os.getenv('HOST', '0.0.0.0')
-PORT = int(os.getenv('PORT', '8000'))
+HOST = os.getenv('HOST', '127.0.0.1')
+PORT = int(os.getenv('PORT', '38473'))
 API_KEY = os.getenv('API_KEY', '')
 # 跨平台默认工作目录：Windows / macOS / Linux 三端通用（~/lumu-workspace）。
 # 仅当环境变量 AGENT_BASE_DIR 完全未设置时生效；设为空字符串时回落到 cwd（与 .env 现状兼容）。
@@ -169,3 +169,30 @@ def get_media_config(provider: str | None = None) -> dict:
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 JSON_LOGS = os.getenv("JSON_LOGS", "false").lower() == "true"
+
+
+# ── 渠道配置持久化（WebUI 设置页可写，覆盖 .env 环境变量）──
+# WebUI「设置 → 渠道接入」会把各渠道凭据写入 data/channels.json，
+# 路由工厂优先读这里、回退 .env，实现「界面配置、无需手改 .env」。
+CHANNELS_CONFIG_PATH = DATA_DIR / "channels.json"
+
+
+def load_channels_config() -> dict:
+    """读取 WebUI 保存的渠道配置（{channel_key: {ENV_KEY: value}}）。
+
+    文件缺失/损坏时回退空 dict，不影响 .env 既有配置。"""
+    try:
+        import json
+        return json.loads(CHANNELS_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_channels_config(data: dict) -> None:
+    """原子写入渠道配置（先写临时文件再 rename，避免半写损坏）。"""
+    import json
+    import tempfile
+    tmp = CHANNELS_CONFIG_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(CHANNELS_CONFIG_PATH)
+    CHANNELS_CONFIG_PATH.chmod(0o644)

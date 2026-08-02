@@ -25,7 +25,7 @@ class CodeSandbox:
 
     def __init__(self, docker_socket: str = "/var/run/docker.sock",
                  default_image: str = None, default_timeout: int = 30,
-                 allow_network: bool = False):
+                 allow_network: bool = True):
         self.docker_socket = docker_socket
         self.default_image = default_image or self.DEFAULT_IMAGE
         self.default_timeout = default_timeout
@@ -47,7 +47,7 @@ class CodeSandbox:
                        image: str = None, packages: list[str] = None) -> dict:
         """Execute Python code in a Docker container."""
         if not self.docker_available:
-            return self._execute_local_python(code, timeout)
+            return {"success": False, "stdout": "", "stderr": "", "result": None, "error": "代码沙箱需要 Docker 环境，当前不可用（出于安全，禁止在本机直接执行代码）", "exit_code": -1}
         
         timeout = timeout or self.default_timeout
         image = image or self.default_image
@@ -113,7 +113,7 @@ with open('/workspace/output.json', 'w') as f:
                 # Run container
                 container = self.client.containers.run(
                     image,
-                    f"python /workspace/wrapper.py",
+                    ["sh", "-c", f"{setup_cmd}python /workspace/wrapper.py"],
                     volumes={tmpdir: {"bind": "/workspace", "mode": "rw"}},
                     mem_limit=self.DEFAULT_MEMORY_LIMIT,
                     cpu_period=100000,
@@ -230,7 +230,7 @@ with open('/workspace/output.json', 'w') as f:
                            packages: list[str] = None) -> dict:
         """Execute JavaScript code in a Node.js container."""
         if not self.docker_available:
-            return self._execute_local_js(code, timeout)
+            return {"success": False, "stdout": "", "stderr": "", "result": None, "error": "代码沙箱需要 Docker 环境，当前不可用（出于安全，禁止在本机直接执行代码）", "exit_code": -1}
         
         timeout = timeout or self.default_timeout
 
@@ -294,7 +294,7 @@ fs.writeFileSync('/workspace/output.json', JSON.stringify({{
 
                 container = self.client.containers.run(
                     "node:20-slim",
-                    f"node /workspace/wrapper.js",
+                    ["sh", "-c", f"{setup_cmd}node /workspace/wrapper.js"],
                     volumes={tmpdir: {"bind": "/workspace", "mode": "rw"}},
                     mem_limit=self.DEFAULT_MEMORY_LIMIT,
                     cpu_period=100000,

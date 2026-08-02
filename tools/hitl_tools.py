@@ -11,9 +11,11 @@ REGISTRY = None
 
 
 async def approve_and_execute(action_id: str, feedback: str = "") -> str:
-    """人工审批通道专用：批准并立即执行被挂起的操作。
+    """人工审批通道专用：标记批准。
 
     只允许由 API 层（人类操作）调用，绝不注册为模型工具。
+    实际执行交由发起该审批的对话流（stream_chat）在检测到 approved 后完成，
+    避免审批通道与对话流重复执行同一操作。
     """
     from agent.hitl import get_approval_manager
 
@@ -21,19 +23,9 @@ async def approve_and_execute(action_id: str, feedback: str = "") -> str:
     ok = mgr.approve(action_id, feedback=feedback)
     if not ok:
         return "批准失败：操作不存在或已过期。"
-    # 批准后立即执行被挂起的操作（绕过 HITL 二次拦截；
-    # 命令仍受 tools/terminal.py 中的 CommandSandbox 约束 —— defense in depth）
     action = mgr.get_status(action_id)
-    if action and action.get("status") == "approved":
-        tool_name = action.get("tool_name")
-        tool_args = action.get("tool_args") or {}
-        if REGISTRY is not None and tool_name:
-            try:
-                result = await REGISTRY.execute(tool_name, tool_args)
-                return f"✅ 已批准并执行 {tool_name}（action_id={action_id}）。\n结果：\n{result}"
-            except Exception as e:
-                return f"✅ 已批准，但执行失败：{e}"
-    return f"已批准操作 {action_id}。"
+    tool_name = action.get("tool_name") if action else action_id
+    return f"✅ 已批准操作 {action_id}（{tool_name}）。操作将在当前对话中继续执行。"
 
 
 def register(registry):

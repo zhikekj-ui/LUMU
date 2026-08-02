@@ -4,9 +4,12 @@ from tools.registry import ToolRegistry
 
 
 def _get_sandbox():
-    """Lazy-init code sandbox."""
+    """Lazy-init code sandbox. Network is ON by default (open-box experience);
+    opt out via LUMU_SANDBOX_ALLOW_NETWORK=0/false/no/off."""
     from sandbox.executor import CodeSandbox
-    return CodeSandbox()
+    env = os.getenv("LUMU_SANDBOX_ALLOW_NETWORK", "1")
+    allow = env.strip().lower() not in ("0", "false", "no", "off")
+    return CodeSandbox(allow_network=allow)
 
 
 def handle_run_python(**kwargs):

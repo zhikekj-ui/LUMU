@@ -262,3 +262,4 @@ def search_files(
         return str(e)
     except Exception as e:
         return f"Error searching: {e}"
+

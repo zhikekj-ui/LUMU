@@ -1,0 +1,71 @@
+name: 报告 Bug
+description: 有什么东西没按预期工作
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。带上下面这些信息能让排查快很多。
+
+        > 提交前请确认日志和截图里**没有你的 API Key**。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 简单说说你在做什么、期望什么结果、实际得到什么结果
+      placeholder: 我让它读取一个 PDF，期望返回摘要，实际报错了……
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开对话
+        2. 上传 xxx.pdf
+        3. 输入「总结这份文件」
+        4. 报错
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 报错日志
+      description: 终端输出或 `docker compose logs agent` 的相关片段（会自动按代码块渲染，不用手动加反引号）
+      render: shell
+
+  - type: input
+    id: model
+    attributes:
+      label: 使用的模型和厂商
+      placeholder: 例如 deepseek-chat / DeepSeek 官方接口
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deploy
+    attributes:
+      label: 部署方式
+      options:
+        - 直接运行（python run.py）
+        - Docker
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: 运行环境
+      placeholder: 例如 macOS 15 / Python 3.12.4，或 Ubuntu 22.04 / Docker 27
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: LUMU 版本或 commit
+      placeholder: v0.5.0 或 git rev-parse --short HEAD 的输出

@@ -408,6 +408,23 @@ class CommandSandbox:
         self._whitelist = set(whitelist) if whitelist else None
         self._audit = AuditLogger()
 
+        # ── 保护 LUMU 主体：禁止对框架本体目录/文件的删除、篡改、重定向写入、重命名逃逸 ──
+        # 用户工作数据在 AGENT_BASE_DIR（~/lumu-workspace），不在主体内，不受影响。
+        _home = os.getenv("AGENT_HOME", "/opt/agent-framework")
+        _extra = [
+            rf"rm\s+-rf\s+{re.escape(_home)}(?:\s|$|;|&|/)",   # 删除主体（含整棵子树）
+            rf"chmod\s+-R\s+777\s+{re.escape(_home)}(?:\s|$|;|&|/)",
+            rf"chown\s+.*{re.escape(_home)}",                   # 篡改主体属主
+            rf"mv\s+{re.escape(_home)}(?:\s|$|;|&)",            # 重命名逃逸主体
+            rf">\s*{re.escape(_home)}",                         # 重定向写入主体
+            rf"\btee\s+.*{re.escape(_home)}",
+            rf">\s*/etc/(?:passwd|shadow|sudoers|crontab)",     # 篡改系统账户文件
+            rf"\bchmod\b.*/etc/(?:passwd|shadow|sudoers)",
+            rf"\bchown\b.*/etc/(?:passwd|shadow|sudoers)",
+        ]
+        for _p in _extra:
+            self._blocked_patterns.append(re.compile(_p, re.IGNORECASE))
+
     def validate_command(self, command: str, session_id: str = "") -> tuple[bool, str]:
         """Validate a terminal command.
 

@@ -203,6 +203,10 @@ class Agent:
         self._skills = SkillManager() if not is_sub_agent else None
         self._last_tool_generation = -1
         self._cached_tool_schemas: list[dict] = []
+        # 对话级模型/参数覆盖（临时，不持久化）：温度由路由层按请求设置，流结束后还原
+        self._override_temperature = None
+        # 串行化对话请求：避免临时切换 provider/model 时并发请求互相串台
+        self._chat_lock = asyncio.Lock()
 
         # --- v2: Enhanced subsystems ---
         self._semantic_memory = None
@@ -422,6 +426,9 @@ class Agent:
                 kw["tools"] = tool_schemas
             if stream:
                 kw["stream"] = True
+            # 对话级温度覆盖：仅当本次请求显式指定时生效，否则沿用各调用点的默认温度
+            if getattr(self, "_override_temperature", None) is not None:
+                kw["temperature"] = self._override_temperature
             kw.update(extra)
             return kw
 
@@ -1263,7 +1270,9 @@ class Agent:
         # Auto-inject relevant knowledge from knowledge base (v4: with quality tracking)
         try:
             from knowledge.base import KnowledgeBase
-            kb_path = self._kb_path()
+            _kb_space = getattr(session, "space", "work") or "work"
+            kb_path = self._kb_path(_kb_space)
+            _log(f"[kb-inject] space={_kb_space} path={kb_path}")
             kb = KnowledgeBase(db_path=kb_path)
             results, kb_entry_ids = kb.search_with_tracking(user_message, limit=3)
             # Store retrieved entry IDs for post-conversation quality adjustment
@@ -1279,9 +1288,9 @@ class Agent:
                     messages.append({
                         "role": "system",
                         "content": f"以下是从知识库中检索到的相关知识，可参考用于回答用户问题：\n\n{kb_text}"
-                    })
-        except Exception:
-            pass
+                    }                    )
+        except Exception as _kb_exc:
+            _log(f"[kb-inject] failed space={getattr(session,'space','work')}: {_kb_exc}")
 
         # v5: Implicit feedback learning — detect user correction signals
         _correction_signals = ["不对", "不是", "错了", "重新", "不要这样", "换个方法",
@@ -1291,7 +1300,7 @@ class Agent:
         if _is_correction and hasattr(self, '_last_kb_entry_ids') and self._last_kb_entry_ids:
             try:
                 from knowledge.base import KnowledgeBase
-                _kb_path = self._kb_path()
+                _kb_path = self._kb_path(getattr(session, "space", "work") or "work")
                 _kb = KnowledgeBase(db_path=_kb_path)
                 for _eid in self._last_kb_entry_ids:
                     _kb.adjust_quality(_eid, -0.15)

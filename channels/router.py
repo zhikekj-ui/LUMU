@@ -77,39 +77,55 @@ class _ChannelRouter:
         return self._channels.get(name)
 
     # ---- channel factories (config-driven, lazy import) ----
+    # WebUI「设置 → 渠道接入」保存的凭据优先（config.load_channels_config），
+    # 缺失时回退 .env 环境变量，二者并存互不冲突。
+    def _chcfg(self, name: str) -> dict:
+        return config.load_channels_config().get(name, {}) or {}
+
     def _make_wecom(self):
-        if not (config.WECHAT_WORK_CORP_ID and config.WECHAT_WORK_SECRET and config.WECHAT_WORK_AGENT_ID):
+        cfg = self._chcfg("wecom")
+        corp_id = cfg.get("WECHAT_WORK_CORP_ID") or config.WECHAT_WORK_CORP_ID
+        secret = cfg.get("WECHAT_WORK_SECRET") or config.WECHAT_WORK_SECRET
+        agent_id = cfg.get("WECHAT_WORK_AGENT_ID") or config.WECHAT_WORK_AGENT_ID
+        if not (corp_id and secret and agent_id):
             return None
         from channels.wecom import WeComChannel
         return WeComChannel(
-            corp_id=config.WECHAT_WORK_CORP_ID,
-            agent_id=config.WECHAT_WORK_AGENT_ID,
-            secret=config.WECHAT_WORK_SECRET,
-            token=config.WECHAT_WORK_TOKEN,
-            aes_key=config.WECHAT_WORK_AES_KEY,
+            corp_id=corp_id,
+            agent_id=agent_id,
+            secret=secret,
+            token=cfg.get("WECHAT_WORK_TOKEN") or config.WECHAT_WORK_TOKEN,
+            aes_key=cfg.get("WECHAT_WORK_AES_KEY") or config.WECHAT_WORK_AES_KEY,
         )
 
     def _make_feishu(self):
-        if not (config.FEISHU_APP_ID and config.FEISHU_APP_SECRET):
+        cfg = self._chcfg("feishu")
+        app_id = cfg.get("FEISHU_APP_ID") or config.FEISHU_APP_ID
+        app_secret = cfg.get("FEISHU_APP_SECRET") or config.FEISHU_APP_SECRET
+        if not (app_id and app_secret):
             return None
         from channels.feishu import FeishuChannel
         return FeishuChannel(
-            app_id=config.FEISHU_APP_ID,
-            app_secret=config.FEISHU_APP_SECRET,
-            verify_token=config.FEISHU_VERIFY_TOKEN,
-            encrypt_key=config.FEISHU_ENCRYPT_KEY,
+            app_id=app_id,
+            app_secret=app_secret,
+            verify_token=cfg.get("FEISHU_VERIFY_TOKEN") or config.FEISHU_VERIFY_TOKEN,
+            encrypt_key=cfg.get("FEISHU_ENCRYPT_KEY") or config.FEISHU_ENCRYPT_KEY,
         )
 
     def _make_dingtalk(self):
-        if not (config.DINGTALK_APP_KEY and config.DINGTALK_APP_SECRET):
+        cfg = self._chcfg("dingtalk")
+        app_key = cfg.get("DINGTALK_APP_KEY") or config.DINGTALK_APP_KEY
+        app_secret = cfg.get("DINGTALK_APP_SECRET") or config.DINGTALK_APP_SECRET
+        agent_id = cfg.get("DINGTALK_AGENT_ID") or config.DINGTALK_AGENT_ID
+        if not (app_key and app_secret):
             return None
         from channels.dingtalk import DingTalkChannel
         return DingTalkChannel(
-            app_key=config.DINGTALK_APP_KEY,
-            app_secret=config.DINGTALK_APP_SECRET,
-            agent_id=config.DINGTALK_AGENT_ID,
-            token=config.DINGTALK_TOKEN,
-            aes_key=config.DINGTALK_AES_KEY,
+            app_key=app_key,
+            app_secret=app_secret,
+            agent_id=agent_id,
+            token=cfg.get("DINGTALK_TOKEN") or config.DINGTALK_TOKEN,
+            aes_key=cfg.get("DINGTALK_AES_KEY") or config.DINGTALK_AES_KEY if cfg.get("DINGTALK_AES_KEY") else config.DINGTALK_AES_KEY,
         )
 
     async def _try_start(self, name: str, factory):
@@ -129,12 +145,14 @@ class _ChannelRouter:
         self._agent = agent
 
         # Telegram
-        if config.TELEGRAM_BOT_TOKEN:
-            await self._try_start("telegram", lambda: TelegramChannel(config.TELEGRAM_BOT_TOKEN))
+        tg = self._chcfg("telegram").get("TELEGRAM_BOT_TOKEN") or config.TELEGRAM_BOT_TOKEN
+        if tg:
+            await self._try_start("telegram", lambda: TelegramChannel(tg))
 
         # Discord
-        if config.DISCORD_BOT_TOKEN:
-            await self._try_start("discord", lambda: DiscordChannel(config.DISCORD_BOT_TOKEN))
+        dc = self._chcfg("discord").get("DISCORD_BOT_TOKEN") or config.DISCORD_BOT_TOKEN
+        if dc:
+            await self._try_start("discord", lambda: DiscordChannel(dc))
 
         # Webhook (always available, no external token needed)
         await self._try_start("webhook", lambda: WebhookChannel())
@@ -145,6 +163,13 @@ class _ChannelRouter:
         await self._try_start("dingtalk", self._make_dingtalk)
 
         _logger.info(f"[channels] active: {list(self._channels.keys())}")
+
+    async def reload(self, agent=None):
+        """Stop all channels, then restart from current config (WebUI 保存后热重载)."""
+        a = agent or self._agent
+        await self.stop_all()
+        if a:
+            await self.start_all(a)
 
     async def stop_all(self):
         """Stop all running channels."""
