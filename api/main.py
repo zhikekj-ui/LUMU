@@ -1302,7 +1302,8 @@ async def tts_synthesize(req: TTSSynthesizeRequest, _=Depends(verify_api_key)):
 @app.get("/tts-demo")
 async def tts_demo_page():
     from fastapi.responses import FileResponse
-    return FileResponse("/opt/agent-framework/api/tts_demo.html", media_type="text/html")
+    base = os.getenv("AGENT_HOME", "/opt/agent-framework")
+    return FileResponse(os.path.join(base, "api", "tts_demo.html"), media_type="text/html")
 
 
 # --- 语音输入（STT）---

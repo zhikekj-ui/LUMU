@@ -36,20 +36,34 @@ LUMU 不是又一个聊天窗口。它是一个**常驻在你私人服务器或�
 
 ## 快速开始
 
-### 方式一：直接跑
+### 方式一：直接跑（Windows / macOS / Linux 通用）
+
+需要 **Python 3.10 或以上**（Windows 从 python.org 安装并勾选「Add to PATH」；macOS 用官方包或 brew；Linux 用系统包管理器）。
 
 ```bash
 git clone https://github.com/zhikekj-ui/LUMU.git
 cd LUMU
 
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+# 1) 创建并激活虚拟环境
+python -m venv .venv
+source .venv/bin/activate          # macOS / Linux
+# .venv\Scripts\activate           # Windows (PowerShell)
+
+# 2) 安装依赖
 pip install -r requirements.txt
 
-cp .env.example .env        # 填入你的模型 API Key（也可以之后在界面里配）
+# 3)（可选但推荐）浏览器工具：让「网页浏览 / 截图 / PDF 渲染」可用
+playwright install chromium
+
+# 4) 准备配置（模型 Key 也可启动后在界面「设置」里填）
+cp .env.example .env
+
+# 5) 启动
 python run.py
 ```
 
-打开 `http://127.0.0.1:38473`。前端由后端同源托管，不需要另外起服务。
+打开 `http://127.0.0.1:38473` 即可使用。首次进入在「设置 → 模型」里填一个模型 Key 就能对话。
+数据默认落在仓库目录的 `data/`；Windows / macOS 如需自定义位置，设环境变量 `AGENT_HOME` 指向你的目录即可。
 
 ### 方式二：Docker
 
@@ -57,12 +71,12 @@ python run.py
 git clone https://github.com/zhikekj-ui/LUMU.git
 cd LUMU
 docker compose up -d
-docker compose logs -f agent      # 复制日志里带口令的访问链接
+docker compose logs -f agent      # 查看启动日志
 ```
 
 容器默认只绑定宿主机环回地址（`127.0.0.1:38473`），局域网访问不到。
 
-> 容器内服务绑的是 `0.0.0.0`，会被访问守卫判定为「对外暴露」，因此启动时会自动生成一次性访问口令并打印在日志里。这是有意为之，详见下方安全说明。
+> 容器内服务默认绑 `0.0.0.0`，端口边界由 compose 的 `ports` 控制；**默认打开即用、零门禁、无需口令**。
 
 ---
 
@@ -77,7 +91,7 @@ LUMU 会**真的执行操作**——写文件、跑命令、访问网络。所�
 | 情况 | 行为 |
 |---|---|
 | `HOST=127.0.0.1`（默认） | 只有本机能连，**零鉴权、打开即用** |
-| `HOST=0.0.0.0` 或经反向代理 | 自动生成一次性口令，启动日志打印访问链接 |
+| `HOST=0.0.0.0` 或经反向代理 | 仍打开即用、零门禁（是否加固由你决定） |
 | `LUMU_NO_AUTH=1` | 关闭校验 —— 任何人可执行任意命令，仅限隔离网络 |
 
 另外内置了几层护栏：**核心代码写保护**（智能体改不了 `agent/`、`api/`、`providers/`、`config.py`，扩展只能落到 `plugins/`、`skills/`、`knowledge/`）、**代码沙箱**、**人在回路审批**（高危操作可要求人工确认）。
@@ -91,6 +105,25 @@ LUMU 会**真的执行操作**——写文件、跑命令、访问网络。所�
 全部在 `data/` 目录：对话、记忆、知识库、上传文件、模型配置。除了你主动配置的模型厂商 API，不向任何第三方发送数据。项目不做遥测、不回传统计。
 
 > `data/` 里含有你的 API Key 和全部对话记录，已在 `.gitignore` 中排除。不要提交、不要打包分享。
+
+---
+
+## 升级
+
+代码持续更新，升级**不丢数据**——`data/`（对话、记忆、配置）与 `skills/packs/`（自写技能）都已持久化在宿主机 / 挂载卷。
+
+**Docker 方式**
+```bash
+git pull
+docker compose up -d --build
+```
+
+**本地方式**
+```bash
+git pull
+pip install -r requirements.txt
+python run.py
+```
 
 ---
 

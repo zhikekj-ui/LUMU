@@ -1,7 +1,9 @@
 # LUMU —— 个人智能体，一条命令跑起来
 #
 #   docker compose up -d
-#   docker compose logs -f agent      # 从日志里复制带口令的访问链接
+#   docker compose logs -f agent      # 查看启动日志
+#
+#   升级：拉取新代码后执行  docker compose up -d --build
 #
 # 默认是「单容器 + SQLite」的个人模式，不需要数据库，不需要 Redis。
 # 需要 Postgres / Redis 的重型部署见文件末尾的 scale 配置段。
@@ -23,13 +25,14 @@ services:
       HOST: "0.0.0.0"
       PORT: "38473"
       LOG_LEVEL: "INFO"
-      # 想用固定口令（省去每次翻日志），取消下一行注释并改成你自己的随机串
+      # 访问守卫默认关闭、打开即用、零门禁；如需固定口令门禁，取消注释并填随机串
+      # （配合 .env 里的 LUMU_TOKEN 启用守卫）
       # LUMU_TOKEN: "change-me-to-a-long-random-string"
 
-    # .env 可选：没有也能启动，模型 Key 可以在 Web 界面里配。
-    # 若你已创建 .env，取消下面两行注释即可自动加载。
-    # env_file:
-    #   - .env
+    # 自动加载同目录的 .env（由 .env.example 复制而来，可含模型 Key 等配置）。
+    # 没有 .env 也能启动，模型 Key 也可在 Web 界面「设置」里配。
+    env_file:
+      - .env
 
     volumes:
       # 你的全部数据（对话、记忆、知识库、配置）都在这里，删容器不丢
