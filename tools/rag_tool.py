@@ -1,5 +1,6 @@
 """RAG tools — document ingestion and retrieval for the agent."""
 import os
+from pathlib import Path
 from tools.registry import ToolRegistry
 
 # 复用与知识库统一的语义向量（bge-small-zh-v1.5 / fastembed，512 维），
@@ -10,7 +11,7 @@ from knowledge.embedding import get_embedding_fn
 def _get_pipeline():
     """Lazy-init RAG pipeline with real semantic embeddings."""
     from rag.pipeline import RAGPipeline
-    data_dir = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "rag")
+    data_dir = os.path.join(os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent)), "data", "rag")
     return RAGPipeline(data_dir=data_dir, embedding_fn=get_embedding_fn())
 
 

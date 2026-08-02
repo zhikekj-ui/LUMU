@@ -224,7 +224,7 @@ def _synthesize_mimo(text: str, voice: str, style: str) -> dict:
                 audio_data = choice["audio"].get("data", "") or choice["audio"].get("base64", "")
 
             if audio_data:
-                output_dir = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "audio")
+                output_dir = os.path.join(os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent)), "data", "audio")
                 os.makedirs(output_dir, exist_ok=True)
 
                 filename = f"tts_{uuid.uuid4().hex[:8]}.mp3"
@@ -278,7 +278,7 @@ def _synthesize_edge(text: str, voice: str, rate: str = "+8%", pitch: str = "+2H
         if not clean_text:
             return {"error": "Text is empty after cleaning"}
 
-        output_dir = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "audio")
+        output_dir = os.path.join(os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent)), "data", "audio")
         os.makedirs(output_dir, exist_ok=True)
 
         import uuid

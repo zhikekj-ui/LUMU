@@ -1,12 +1,13 @@
 """Knowledge base tools — persistent structured knowledge storage and retrieval."""
 import os
+from pathlib import Path
 from tools.registry import ToolRegistry
 
 
 def _get_kb():
     """Lazy-init knowledge base."""
     from knowledge.base import KnowledgeBase
-    db_path = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "knowledge.db")
+    db_path = os.path.join(os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent)), "data", "knowledge.db")
     return KnowledgeBase(db_path=db_path)
 
 

@@ -1,6 +1,7 @@
 """Tool registry — AST-based auto-discovery + generation counter (from Hermes Agent)."""
 import ast
 import importlib.util
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,8 +68,10 @@ def _check_write_protection(tool_name: str, arguments: dict) -> str | None:
         # Check if command references protected paths
         import re
         # Match paths that look like they're modifying core files
+        _home_for_regex = os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent))
         dangerous_patterns = [
-            r"/opt/agent-framework/(agent|api|providers)/",
+            rf"{re.escape(_home_for_regex)}/(agent|api|providers)/",
+            r"/opt/agent-framework/(agent|api|providers)/",  # 服务器默认路径兜底
             r"config\.py",
             r"registry\.py",
             r"\.env",

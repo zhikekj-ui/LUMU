@@ -22,7 +22,7 @@ SKILL.md 格式（frontmatter + 正文）：
 import os
 from pathlib import Path
 
-PACKS_DIR = Path(os.getenv("AGENT_HOME", ".")) / "skills" / "packs"
+PACKS_DIR = Path(os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent))) / "skills" / "packs"
 
 # mtime 缓存：path -> (mtime, parsed_dict)
 _cache: dict = {}

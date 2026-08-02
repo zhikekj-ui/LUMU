@@ -63,7 +63,7 @@ python run.py
 ```
 
 打开 `http://127.0.0.1:38473` 即可使用。首次进入在「设置 → 模型」里填一个模型 Key 就能对话。
-数据默认落在仓库目录的 `data/`；Windows / macOS 如需自定义位置，设环境变量 `AGENT_HOME` 指向你的目录即可。
+数据默认落在项目目录的 `data/`（Windows / macOS / Linux 三端通用，无需任何额外设置）；想自定义位置，设环境变量 `AGENT_HOME` 指向你的目录即可。
 
 ### 方式二：Docker
 

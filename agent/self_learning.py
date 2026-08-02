@@ -440,7 +440,7 @@ class SelfLearningEngine:
     # ----------------------------------------------------------
     def _persist_init(self) -> None:
         """确保 lessons.db 有 source_id 列与唯一索引 (幂等)。"""
-        home = Path(os.getenv("AGENT_HOME", "."))
+        home = Path(os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent)))
         lp = home / "data" / "lessons.db"
         mp = home / "data" / "memory.db"
         with sqlite3.connect(lp) as c:
@@ -454,7 +454,7 @@ class SelfLearningEngine:
     def _persist_lesson(self, lesson) -> None:
         try:
             self._persist_init()
-            home = Path(os.getenv("AGENT_HOME", "."))
+            home = Path(os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent)))
             lp = home / "data" / "lessons.db"
             with sqlite3.connect(lp) as c:
                 c.execute(
@@ -483,7 +483,7 @@ class SelfLearningEngine:
 
     def _persist_preference(self, pref) -> None:
         try:
-            home = Path(os.getenv("AGENT_HOME", "."))
+            home = Path(os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent)))
             mp = home / "data" / "memory.db"
             key = f"sl_pref:{pref.id}"
             content = f"[{pref.category}] {pref.preference_key}={pref.preference_value} (置信度 {pref.confidence:.2f})"

@@ -1,4 +1,5 @@
 from core.logging_config import get_logger
+from pathlib import Path
 _logger = get_logger("agent.core")
 from core.user_config import get_provider_key, get_system_prompt
 """Agent core — the main conversation loop (inspired by Hermes Agent + OpenClaw).
@@ -336,7 +337,7 @@ class Agent:
             self._context_profile = None
             try:
                 from agent.context_profile import ContextProfile
-                _cp_path = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "context_profile.json")
+                _cp_path = os.path.join(os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent)), "data", "context_profile.json")
                 self._context_profile = ContextProfile(_cp_path)
                 _log(f"[core] Context profile loaded: {self._context_profile.stats()}")
             except Exception as e:
@@ -917,7 +918,7 @@ class Agent:
     def _confirmed_pref_keys(self) -> "set[str]":
         """读取确认存储，返回已确认（importance=0.95）的记忆 key 集合。"""
         try:
-            _home = os.getenv("AGENT_HOME", "/opt/agent-framework")
+            _home = os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent))
             _p = os.path.join(_home, "data", "memory_confirmations.json")
             if not os.path.exists(_p):
                 return set()
@@ -1194,7 +1195,7 @@ class Agent:
             to_archive = [m for _, m in candidates[:cap]]
             if not to_archive:
                 return 0
-            _home = os.getenv("AGENT_HOME", "/opt/agent-framework")
+            _home = os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent))
             _arc = os.path.join(_home, "data", "memory_archive.json")
             _data = []
             try:
@@ -1636,7 +1637,7 @@ class Agent:
     def _kb_path(self, space: str = None) -> str:
         """按空间隔离知识库的 DB 路径：data/knowledge_{space}.db。"""
         sp = space or getattr(self, "_current_space", "work") or "work"
-        home = os.getenv("AGENT_HOME", "/opt/agent-framework")
+        home = os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent))
         return os.path.join(home, "data", f"knowledge_{sp}.db")
 
     async def chat(self, user_message: str, session_id: str | None = None, images: list[str] | None = None, files: list[dict] | None = None, voice_mode: bool = False, space: str = "work") -> dict:

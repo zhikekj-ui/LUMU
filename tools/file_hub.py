@@ -10,6 +10,7 @@ fid 即临时下载令牌（UUID，不可猜），无需额外鉴权；文件生
 回退到 "__default__"，避免跨会话串台。
 """
 import os
+from pathlib import Path
 import json
 import uuid
 import shutil
@@ -18,7 +19,7 @@ import contextvars
 
 logger = logging.getLogger("lumu")
 
-AGENT_HOME = os.getenv("AGENT_HOME", "/opt/agent-framework")
+AGENT_HOME = os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent))
 FILE_STORE = os.path.join(AGENT_HOME, "data", "files")
 
 # 当前对话会话 id（在 chat_stream 入口 set），用于精确归属文件

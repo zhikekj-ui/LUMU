@@ -424,7 +424,7 @@ async def create_session(space: str = "work", _=Depends(verify_api_key)):
 
 # --- Memory ---
 # --- Memory confirmation store（非破坏性、隔离的 JSON 存储，不碰 MemoryManager 表结构）---
-_MEM_CONFIRM_PATH = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "memory_confirmations.json")
+_MEM_CONFIRM_PATH = os.path.join(os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent)), "data", "memory_confirmations.json")
 
 def _load_confirms() -> dict:
     try:
@@ -1302,7 +1302,7 @@ async def tts_synthesize(req: TTSSynthesizeRequest, _=Depends(verify_api_key)):
 @app.get("/tts-demo")
 async def tts_demo_page():
     from fastapi.responses import FileResponse
-    base = os.getenv("AGENT_HOME", "/opt/agent-framework")
+    base = os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent))
     return FileResponse(os.path.join(base, "api", "tts_demo.html"), media_type="text/html")
 
 
@@ -1463,7 +1463,7 @@ async def reembed_knowledge(space: str = "", _=Depends(verify_api_key)):
 def _kb_db_path(space: str = ""):
     """按空间隔离知识库：knowledge_{space}.db，默认 work。"""
     sp = space or "work"
-    home = os.getenv("AGENT_HOME", "/opt/agent-framework")
+    home = os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent))
     return os.path.join(home, "data", f"knowledge_{sp}.db")
 
 
@@ -1719,7 +1719,7 @@ async def kb_graph(space: str = "", _=Depends(verify_api_key)):
     """返回知识记忆生命球体的节点/边/统计，供前端 Canvas2D 渲染（knowledge 按 space 隔离）。"""
     import os, sqlite3, json, math
     from collections import defaultdict, Counter
-    base = os.getenv("AGENT_HOME", "/opt/agent-framework")
+    base = os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent))
     data_dir = os.path.join(base, "data")
     kb_file = f"knowledge_{space or 'work'}.db"
 
@@ -1898,7 +1898,7 @@ async def add_relation(req: RelationRequest, _=Depends(verify_api_key)):
     """新增手动语义关系 (P1-3)。"""
     import os, sqlite3
     from datetime import datetime
-    base = os.getenv("AGENT_HOME", "/opt/agent-framework")
+    base = os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent))
     c = sqlite3.connect(os.path.join(base, "data", "graph.db"))
     c.execute("CREATE TABLE IF NOT EXISTS graph_relations(id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, target TEXT, rel TEXT, note TEXT, created_at TEXT)")
     cur = c.execute("INSERT INTO graph_relations(source, target, rel, note, created_at) VALUES(?,?,?,?,?)",
@@ -1912,7 +1912,7 @@ async def add_relation(req: RelationRequest, _=Depends(verify_api_key)):
 async def del_relation(rel_id: int, _=Depends(verify_api_key)):
     """删除手动语义关系 (P1-3)。"""
     import os, sqlite3
-    base = os.getenv("AGENT_HOME", "/opt/agent-framework")
+    base = os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent))
     c = sqlite3.connect(os.path.join(base, "data", "graph.db"))
     c.execute("DELETE FROM graph_relations WHERE id=?", (rel_id,))
     c.commit(); c.close()
@@ -1923,7 +1923,7 @@ async def del_relation(rel_id: int, _=Depends(verify_api_key)):
 async def get_timeline(limit: int = 300, offset: int = 0, _=Depends(verify_api_key)):
     """会话事件时间线 (P1-4)：把每轮展开为 user/tool/assistant 事件。"""
     import os, sqlite3, json
-    base = os.getenv("AGENT_HOME", "/opt/agent-framework")
+    base = os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent))
     c = sqlite3.connect(os.path.join(base, "data", "interactions.db"))
     try:
         total = list(c.execute("SELECT COUNT(*) FROM interactions"))[0][0]
@@ -2476,7 +2476,7 @@ async def api_capabilities(_=Depends(verify_api_key)):
         routes = sorted({getattr(r, "path", "") for r in app.routes if getattr(r, "path", "")})
         return {
             "ok": True,
-            "agent_home": os.getenv("AGENT_HOME", "/opt/agent-framework"),
+            "agent_home": os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent)),
             "tool_count": len(tools),
             "tools": tools,
             "toolsets": toolsets,

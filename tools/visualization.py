@@ -1,12 +1,13 @@
 """Visualization tools — generate charts from data for the agent."""
 import os
+from pathlib import Path
 from tools.registry import ToolRegistry
 
 
 def _get_chart_generator():
     """Lazy-init chart generator."""
     from visualization.charts import ChartGenerator
-    output_dir = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data", "charts")
+    output_dir = os.path.join(os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent)), "data", "charts")
     return ChartGenerator(output_dir=output_dir)
 
 

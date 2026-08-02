@@ -6,13 +6,14 @@ Run on the server with the project venv:
 Idempotent by skill name; deletes the old db first for a clean re-seed.
 """
 import os
+from pathlib import Path
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from skills.manager import SkillManager
 
-DATA_DIR = os.path.join(os.getenv("AGENT_HOME", "/opt/agent-framework"), "data")
+DATA_DIR = os.path.join(os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent)), "data")
 DB_PATH = os.path.join(DATA_DIR, "skills.db")
 
 # 删除旧库，确保 space 字段干净重建

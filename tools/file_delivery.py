@@ -18,7 +18,7 @@ def register(registry):
         name="deliver_file",
         description=(
             "将你生成的文件交付给前端用户，使其在对话中出现可下载卡片。"
-            "path 为服务器文件路径（绝对，或相对 /opt/agent-framework）。"
+            "path 为工作区文件路径（绝对，或相对 AGENT_HOME）。"
             "当用户要你'发文件给我 / 导出结果 / 生成可下载内容 / 把报告发我'时使用此工具。"
         ),
         parameters={

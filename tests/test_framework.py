@@ -52,9 +52,10 @@ def test_providers_discovered_with_domestic():
 
 
 def test_security_protected_paths():
-    from tools.registry import _is_protected_path
-    assert _is_protected_path("/opt/agent-framework/config.py") is True
-    assert _is_protected_path("/opt/agent-framework/tools/foo.py") is False
+    from tools.registry import _is_protected_path, _BASE
+    # 跟随真实项目根目录（不论代码装在 /opt/agent-framework 还是开发机任意路径）
+    assert _is_protected_path(str(_BASE / "config.py")) is True
+    assert _is_protected_path(str(_BASE / "tools" / "foo.py")) is False
     assert _is_protected_path("/tmp/safe.txt") is False
 
 

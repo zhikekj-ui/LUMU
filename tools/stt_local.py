@@ -10,6 +10,7 @@
 - HF_ENDPOINT:    模型下载源，默认 https://hf-mirror.com（直连 HF 不通时的镜像）
 """
 import os
+from pathlib import Path
 import logging
 import tempfile
 import threading
@@ -17,7 +18,7 @@ import subprocess
 
 logger = logging.getLogger("lumu")
 
-AGENT_HOME = os.getenv("AGENT_HOME", "/opt/agent-framework")
+AGENT_HOME = os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent))
 MODEL_DIR = os.path.join(AGENT_HOME, "data", "models")
 MODEL_SIZE = os.getenv("LUMU_STT_MODEL", "small")  # small: 中文准确度显著优于 base
 

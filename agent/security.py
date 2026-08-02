@@ -410,7 +410,7 @@ class CommandSandbox:
 
         # ── 保护 LUMU 主体：禁止对框架本体目录/文件的删除、篡改、重定向写入、重命名逃逸 ──
         # 用户工作数据在 AGENT_BASE_DIR（~/lumu-workspace），不在主体内，不受影响。
-        _home = os.getenv("AGENT_HOME", "/opt/agent-framework")
+        _home = os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent))
         _extra = [
             rf"rm\s+-rf\s+{re.escape(_home)}(?:\s|$|;|&|/)",   # 删除主体（含整棵子树）
             rf"chmod\s+-R\s+777\s+{re.escape(_home)}(?:\s|$|;|&|/)",

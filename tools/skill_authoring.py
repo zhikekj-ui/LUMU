@@ -61,7 +61,7 @@ def write_skill_pack(name: str, description: str, content: str, triggers: str = 
     if not re.match(r"^[A-Za-z0-9_-]+$", name or ""):
         return "⛔ 技能名仅允许字母、数字、中划线、下划线"
 
-    base = Path(os.getenv("AGENT_HOME", "/opt/agent-framework"))
+    base = Path(os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent)))
     packs_root = (base / "skills" / "packs").resolve()
     pdir = (packs_root / name).resolve()
 
