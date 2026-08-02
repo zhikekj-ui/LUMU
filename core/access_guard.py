@@ -4,12 +4,8 @@
 
   * 只在本机监听、且请求确实来自本机  → 零鉴权、无登录、打开即用。
     个人使用的绝大多数场景走这条路，用户完全无感。
-  * 一旦对外暴露（绑定非环回地址 / 经反向代理 / 请求来源非环回 /
-    显式声明 LUMU_PUBLIC=1） → 必须携带访问口令。
-  * 口令在首次需要时于本机随机生成，写入 data/access_token（0600），
-    并在启动横幅里打印成一条可直接点击的带 token 链接。
-    点一次，浏览器种下 cookie，之后长期免输。
-  * 想彻底关掉：LUMU_NO_AUTH=1（启动时会红字警告）。
+  * LUMU 是个人智能体，默认开放访问、无需口令、打开即用。
+  * 是否把实例暴露到公网、以及如何防护，由使用者自行决定，框架不强制任何门禁。
 
 仓库里不存放任何密钥；口令永远是运行时本机生成的，
 因此开源分发的产物中不含任何可用凭据。
@@ -47,8 +43,11 @@ def _token_file() -> Path:
 # ---------------------------------------------------------------- 开关判定
 
 def auth_disabled() -> bool:
-    """用户显式关闭鉴权。"""
-    return os.getenv("LUMU_NO_AUTH", "").strip().lower() in _TRUE
+    """访问守卫默认关闭：LUMU 是个人智能体，打开即用、无需口令。
+
+    使用者若把实例暴露到公网，如何防护由使用者自己决定，框架不强制门禁。
+    """
+    return True
 
 
 def declared_public() -> bool:
@@ -233,10 +232,10 @@ def startup_banner(host: str, port: int) -> None:
     line = "─" * 62
 
     if auth_disabled():
-        print(f"\n\033[31m{line}\n"
-              f"  ⚠  LUMU_NO_AUTH=1：访问守卫已关闭，任何人都能调用本实例。\n"
-              f"     若本服务能被公网访问，请立刻取消该设置。\n"
-              f"{line}\033[0m\n", flush=True)
+        print(f"\n\033[36m{line}\033[0m\n"
+              f"  LUMU 已启动 · \033[36m开放访问\033[0m（无需口令，打开即用）\n"
+              f"  控制台：\033[4mhttp://127.0.0.1:{port}\033[0m\n"
+              f"\033[36m{line}\033[0m\n", flush=True)
         return
 
     exposed = bind_is_public() or declared_public()
