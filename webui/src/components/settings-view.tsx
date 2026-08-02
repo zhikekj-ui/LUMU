@@ -370,9 +370,15 @@ export function SettingsView() {
           {providers.map((p) => (
             <div key={p.name} className="flex flex-wrap items-center gap-2">
               <span className="w-36 text-sm font-medium">{p.display_name}</span>
-              <Badge variant="outline" className="font-mono text-xs">
+              <Badge
+                variant="outline"
+                className={
+                  "font-mono text-xs " +
+                  (p.api_key_configured ? "border-emerald-500/40 text-emerald-300" : "")
+                }
+              >
                 <IconKey className="mr-1 size-3" />
-                {p.api_key_configured ? p.api_key : "未配置"}
+                {p.api_key_configured ? (p.api_key_preview || "已配置") : "未配置"}
               </Badge>
               <Input
                 placeholder="输入新的 API Key"
