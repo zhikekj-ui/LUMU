@@ -42,9 +42,12 @@ import {
   setProviderKey,
   fetchChannelsConfig,
   saveChannelsConfig,
+  fetchAccess,
+  setAccess,
   type AppConfig,
   type Provider,
   type ChannelDef,
+  type AccessState,
 } from "@/lib/lumu"
 
 export function SettingsView() {
@@ -65,6 +68,11 @@ export function SettingsView() {
   const [channels, setChannels] = React.useState<ChannelDef[]>([])
   const [drafts, setDrafts] = React.useState<Record<string, Record<string, string>>>({})
   const [chSaving, setChSaving] = React.useState<string | null>(null)
+
+  // 访问与分享（小白开关：本机 / 对外分享）
+  const [access, setAccessState] = React.useState<AccessState | null>(null)
+  const [accessLoading, setAccessLoading] = React.useState(true)
+  const [accessBusy, setAccessBusy] = React.useState(false)
 
   const load = React.useCallback(async () => {
     setLoading(true)
@@ -128,6 +136,10 @@ export function SettingsView() {
     load()
   }, [load])
 
+  React.useEffect(() => {
+    loadAccess()
+  }, [loadAccess])
+
   const configured = providers.filter((p) => p.api_key_configured)
   const curProvider = providers.find((p) => p.name === selProvider)
   const modelOptions = curProvider
@@ -172,6 +184,46 @@ export function SettingsView() {
       setKeys((s) => ({ ...s, [name]: "" }))
     } catch (e: any) {
       setKeyMsg("更新失败：" + String(e?.message || e))
+    }
+  }
+
+  // 访问与分享：读取 + 切换模式 + 复制 + 重新生成口令
+  const accessMode = access?.mode ?? "local"
+  const loadAccess = React.useCallback(async () => {
+    setAccessLoading(true)
+    try {
+      setAccessState(await fetchAccess())
+    } catch (e: any) {
+      toast.error("读取访问设置失败：" + String(e?.message || e))
+    } finally {
+      setAccessLoading(false)
+    }
+  }, [])
+  const copyLink = async () => {
+    const link = access?.share_link || ""
+    try {
+      await navigator.clipboard.writeText(link)
+      toast.success("分享链接已复制")
+    } catch {
+      toast.error("复制失败，请手动选择链接复制")
+    }
+  }
+  const onAccess = async (action: "enable" | "rotate" | "disable") => {
+    setAccessBusy(true)
+    try {
+      if (action === "rotate") {
+        const r = await setAccess("rotate")
+        setAccessState((s) => (s ? { ...s, share_link: r.share_link ?? s.share_link } : s))
+        toast.success("已重新生成口令，旧链接已失效")
+      } else {
+        await setAccess(action)
+        await loadAccess()
+        toast.success(action === "enable" ? "已开启对外分享，链接已生成" : "已切回仅本机")
+      }
+    } catch (e: any) {
+      toast.error(String(e?.message || e))
+    } finally {
+      setAccessBusy(false)
     }
   }
 
@@ -416,6 +468,80 @@ export function SettingsView() {
             )
           })}
         </div>
+      </div>
+
+      {/* 访问与分享（小白开关：本机 / 对外分享） */}
+      <div className="space-y-3">
+        <div className="flex items-center gap-2">
+          <IconBroadcast className="size-4 text-[#7fdcff]" />
+          <h2 className="font-display text-lg font-semibold tracking-tight">访问与分享</h2>
+        </div>
+        <p className="text-sm text-muted-foreground">
+          决定谁能打开这个 LUMU 实例。默认仅本机、免口令；想分享给别人时打开「对外分享」，系统会自动生成一条带口令的链接，复制发给他即可，无需任何配置。
+        </p>
+        <Card>
+          <CardContent className="space-y-4 pt-6">
+            <div className="inline-flex rounded-lg border border-border p-1">
+              <button
+                type="button"
+                onClick={() => onAccess("disable")}
+                disabled={accessBusy || !!access?.exposed}
+                className={`rounded-md px-4 py-1.5 text-sm transition-colors ${
+                  accessMode === "local"
+                    ? "bg-[#7fdcff]/15 font-medium text-[#7fdcff]"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                仅本机（免口令）
+              </button>
+              <button
+                type="button"
+                onClick={() => onAccess("enable")}
+                disabled={accessBusy}
+                className={`rounded-md px-4 py-1.5 text-sm transition-colors ${
+                  accessMode === "share"
+                    ? "bg-[#7fdcff]/15 font-medium text-[#7fdcff]"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                对外分享（自动口令）
+              </button>
+            </div>
+
+            {accessLoading ? (
+              <Skeleton className="h-10 w-full" />
+            ) : accessMode === "share" ? (
+              <>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    readOnly
+                    value={access?.share_link || ""}
+                    className="max-w-xl font-mono text-xs"
+                  />
+                  <Button size="sm" variant="outline" onClick={copyLink}>
+                    复制链接
+                  </Button>
+                </div>
+                <p className="text-[11px] leading-relaxed text-muted-foreground/70">
+                  链接里已包含口令，发给谁、谁就能进。若担心泄露，点下面的「重新生成口令」，旧链接立刻失效。
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onAccess("rotate")}
+                  disabled={accessBusy}
+                >
+                  <IconKey className="mr-1 size-4" />
+                  重新生成口令
+                </Button>
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                只有这台设备能打开，外人无法访问，无需口令。要把 LUMU 分享给其他人，请切到「对外分享」。
+              </p>
+            )}
+          </CardContent>
+        </Card>
       </div>
     </div>
   )

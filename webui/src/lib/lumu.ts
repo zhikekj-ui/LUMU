@@ -316,3 +316,23 @@ export async function saveChannelsConfig(channels: Record<string, Record<string,
     body: JSON.stringify({ channels }),
   })).json()
 }
+
+// ── 访问模式（小白开关：本机 / 对外分享）──
+export interface AccessState {
+  mode: "local" | "share"
+  exposed: boolean
+  auth_disabled: boolean
+  token_present: boolean
+  share_link: string | null
+}
+export async function fetchAccess(): Promise<AccessState> {
+  return (await req("/access")).json()
+}
+export async function setAccess(
+  action: "enable" | "rotate" | "disable",
+): Promise<{ ok?: boolean; mode?: string; share_link?: string | null }> {
+  return (await req("/access", {
+    method: "POST",
+    body: JSON.stringify({ action }),
+  })).json()
+}
