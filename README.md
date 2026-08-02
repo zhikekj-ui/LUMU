@@ -6,6 +6,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![CI](https://github.com/zhikekj-ui/LUMU/actions/workflows/ci.yml/badge.svg)](https://github.com/zhikekj-ui/LUMU/actions/workflows/ci.yml)
 [![Website](https://img.shields.io/badge/Website-lumux.cn-7fdcff)](https://lumux.cn)
+[![GitHub stars](https://img.shields.io/github/stars/zhikekj-ui/LUMU?style=social)](https://github.com/zhikekj-ui/LUMU)
 
 🔗 想看 LUMU 实际能做什么？上 [官网 lumux.cn](https://lumux.cn) 看完整能力清单，或预约一场真实环境演示。
 
