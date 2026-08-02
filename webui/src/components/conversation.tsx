@@ -365,6 +365,12 @@ export function Conversation() {
   const [attachErr, setAttachErr] = React.useState("")
   const fileInputRef = React.useRef<HTMLInputElement>(null)
   const dragDepth = React.useRef(0)
+  // 中止控制器：供「停止」按钮取消进行中的流式请求
+  const abortRef = React.useRef<AbortController | null>(null)
+  // 后端连接状态：驱动输入框「在线/离线」提示与禁用逻辑，避免「输进去没反应」无从判断
+  const [backend, setBackend] = React.useState<"online" | "offline" | "connecting">(
+    "connecting"
+  )
   // 镜像队列：addFiles 是稳定回调（空依赖），必须靠 ref 读到最新值，否则闭包过期会漏算已有附件
   const attachmentsRef = React.useRef<PendingAttach[]>([])
   React.useEffect(() => {
@@ -377,6 +383,30 @@ export function Conversation() {
     const t = setTimeout(() => setAttachErr(""), 4000)
     return () => clearTimeout(t)
   }, [attachErr])
+
+  // 后端健康探测：进入即探一次，之后每 5s 轮询；标签页重新可见时也补探，保证状态灯实时
+  React.useEffect(() => {
+    let alive = true
+    const probe = async () => {
+      try {
+        const r = await fetch("/api/health", { cache: "no-store" })
+        if (alive) setBackend(r.ok ? "online" : "offline")
+      } catch {
+        if (alive) setBackend("offline")
+      }
+    }
+    probe()
+    const t = setInterval(probe, 5000)
+    const onVis = () => {
+      if (document.visibilityState === "visible") probe()
+    }
+    document.addEventListener("visibilitychange", onVis)
+    return () => {
+      alive = false
+      clearInterval(t)
+      document.removeEventListener("visibilitychange", onVis)
+    }
+  }, [])
 
   const addFiles = React.useCallback(
     async (list: File[]) => {
@@ -697,6 +727,7 @@ export function Conversation() {
   }
 
   async function send() {
+    if (backend === "offline") return
     const text = input.trim()
     const atts = attachments
     // 允许「只发附件不打字」
@@ -755,6 +786,8 @@ export function Conversation() {
     const space = cur.space || cur.id // 兜底：缺 space 时用 id，记忆仍隔离
 
     try {
+      const ctrl = new AbortController()
+      abortRef.current = ctrl
       // 只发附件不打字时补一句默认指令（后端 message 为必填）
       const outMsg = text || "请查看我上传的附件。"
       const body: any = { message: outMsg, session_id: sid, space }
@@ -768,6 +801,7 @@ export function Conversation() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        signal: ctrl.signal,
       })
       if (!res.ok || !res.body) throw new Error("后端返回 " + res.status)
       const reader = res.body.getReader()
@@ -795,6 +829,7 @@ export function Conversation() {
     } catch (e: any) {
       appendBlockText(aid, "\n\n[连接后端失败] " + (e?.message || String(e)))
     } finally {
+      abortRef.current = null
       // 本轮执行结束：写入结束时刻
       setActiveMessages((m) =>
         m.map((x) =>
@@ -803,6 +838,23 @@ export function Conversation() {
       )
       setStreaming(false)
     }
+  }
+
+  // 停止当前生成：中止流式请求并收尾（避免「发了没反应」时用户无法中断）
+  function stop() {
+    abortRef.current?.abort()
+    abortRef.current = null
+    setStreaming(false)
+    setActiveMessages((m) =>
+      m.map((x) => {
+        if (!x.streaming) return x
+        const blocks =
+          x.blocks && x.blocks.length
+            ? x.blocks
+            : ([{ type: "text", text: "（已停止）" }] as Block[])
+        return { ...x, blocks, streaming: false, finishedAt: Date.now() }
+      })
+    )
   }
 
   return (
@@ -914,8 +966,17 @@ export function Conversation() {
                   })()
                 ) : (
                   <div className="rounded-2xl border border-white/[0.06] bg-sidebar/40 px-4 py-3 text-sm leading-relaxed text-foreground">
-                    {(m.blocks || []).length === 0 ? (
-                      <span className="inline-block h-4 w-1.5 animate-pulse bg-muted-foreground/60 align-middle" />
+                    {(m.blocks || []).length === 0 ? m.streaming ? (
+                      <div className="flex items-center gap-2 py-0.5 text-[var(--faint)]">
+                        <span className="flex gap-1">
+                          <i className="dotp" />
+                          <i className="dotp" />
+                          <i className="dotp" />
+                        </span>
+                        <span className="think-txt">思考中…</span>
+                      </div>
+                    ) : (
+                      <span className="text-[var(--dim)] text-xs">（无响应内容）</span>
                     ) : (
                       <div className="flex flex-col gap-3">
                         {(m.blocks || []).map((b, bi) => {
@@ -1235,90 +1296,148 @@ export function Conversation() {
         </div>
       )}
 
-      <div className="mx-auto flex w-full max-w-3xl items-end gap-2 bg-background p-3 transition-transform duration-150 ease-out hover:scale-[1.015]">
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          className="hidden"
-          onChange={(e) => {
-            addFiles(Array.from(e.target.files || []))
-            e.target.value = "" // 允许重复选同一个文件
-          }}
+      {/* 连接状态灯：始终可见，第一时间告知后端是否在线 */}
+      <div className="mx-auto mb-1.5 flex w-full max-w-3xl items-center gap-2 px-1 font-mono text-[11px]">
+        <span
+          className={cn(
+            "inline-block size-1.5 rounded-full",
+            backend === "online"
+              ? "bg-[var(--cyan)] shadow-[0_0_6px_rgba(127,220,255,0.7)]"
+              : backend === "offline"
+              ? "bg-[var(--danger)]"
+              : "bg-[var(--dim)] animate-pulse"
+          )}
         />
-        <Button
-          size="icon"
-          variant="ghost"
-          className="size-10 shrink-0 rounded-full"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={streaming}
-          aria-label="上传附件"
-          title="上传附件（图片 / 文档 / 代码，也可直接拖拽或粘贴）"
+        <span
+          className={
+            backend === "online"
+              ? "text-[var(--cyan)]"
+              : backend === "offline"
+              ? "text-[var(--danger)]"
+              : "text-[var(--dim)]"
+          }
         >
-          <Paperclip className="size-4" />
-        </Button>
-        {sttAvailable && (
+          {backend === "online" ? "后端在线" : backend === "offline" ? "后端未连接" : "连接中…"}
+        </span>
+        <span className="text-[var(--dim)]">·</span>
+        <span className="text-[var(--dim)]">
+          {backend === "offline"
+            ? "请先启动 LUMU：python run.py"
+            : "Enter 发送 · Shift+Enter 换行 · 拖拽/粘贴文件"}
+        </span>
+      </div>
+
+      {backend === "offline" ? (
+        <div className="mx-auto flex w-full max-w-3xl items-center gap-3 rounded-xl border border-[rgba(255,107,107,0.35)] bg-[rgba(255,107,107,0.06)] px-4 py-3 text-sm text-[var(--danger)]">
+          <span className="inline-block size-2 shrink-0 rounded-full bg-[var(--danger)]" />
+          后端未连接，无法发送。请在本机终端运行{" "}
+          <code className="mx-1 rounded bg-black/30 px-1.5 py-0.5 font-mono text-[var(--amber)]">
+            python run.py
+          </code>{" "}
+          启动 LUMU 服务。
+        </div>
+      ) : (
+        <div className="mx-auto flex w-full max-w-3xl items-end gap-2 rounded-xl border border-[rgba(127,220,255,0.14)] bg-[var(--panel2)] px-3 py-2 transition-shadow focus-within:border-[rgba(127,220,255,0.5)] focus-within:shadow-[0_0_0_3px_rgba(127,220,255,0.10)]">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              addFiles(Array.from(e.target.files || []))
+              e.target.value = "" // 允许重复选同一个文件
+            }}
+          />
           <Button
             size="icon"
-            variant={recording ? "destructive" : "ghost"}
+            variant="ghost"
             className="size-10 shrink-0 rounded-full"
-            onClick={toggleRecord}
-            aria-label={recording ? "停止录音" : "语音输入"}
-            title={recording ? `停止录音 · ${recSeconds}s` : "语音输入（语音转文字）"}
+            onClick={() => fileInputRef.current?.click()}
+            disabled={streaming}
+            aria-label="上传附件"
+            title="上传附件（图片 / 文档 / 代码，也可直接拖拽或粘贴）"
           >
-            {recording ? <Square className="size-4" /> : <Mic className="size-4" />}
+            <Paperclip className="size-4" />
           </Button>
-        )}
-        {recording && (
-          <span className="flex shrink-0 items-center gap-1.5 self-center text-xs text-red-400">
-            <span className="inline-block size-2 animate-pulse rounded-full bg-red-500" />
-            录音中 {recSeconds}s
+          {sttAvailable && (
+            <Button
+              size="icon"
+              variant={recording ? "destructive" : "ghost"}
+              className="size-10 shrink-0 rounded-full"
+              onClick={toggleRecord}
+              aria-label={recording ? "停止录音" : "语音输入"}
+              title={recording ? `停止录音 · ${recSeconds}s` : "语音输入（语音转文字）"}
+            >
+              {recording ? <Square className="size-4" /> : <Mic className="size-4" />}
+            </Button>
+          )}
+          {recording && (
+            <span className="flex shrink-0 items-center gap-1.5 self-center text-xs text-red-400">
+              <span className="inline-block size-2 animate-pulse rounded-full bg-red-500" />
+              录音中 {recSeconds}s
+            </span>
+          )}
+          <span className="select-none self-center pb-1 font-mono text-lg leading-none text-[var(--cyan)]">
+            ›
           </span>
-        )}
-        <textarea
-          ref={textRef}
-          value={input}
-          onChange={(e) => {
-            setInput(e.target.value)
-            autoSize(e.target)
-          }}
-          onKeyDown={(e) => {
-            if (
-              e.key === "Enter" &&
-              !e.shiftKey &&
-              !e.nativeEvent.isComposing &&
-              e.keyCode !== 229
-            ) {
-              e.preventDefault()
-              send()
-            }
-          }}
-          onPaste={(e) => {
-            // 支持直接粘贴截图 / 复制的文件
-            const items = Array.from(e.clipboardData?.items || [])
-            const picked = items
-              .filter((i) => i.kind === "file")
-              .map((i) => i.getAsFile())
-              .filter((f): f is File => !!f)
-            if (picked.length) {
-              e.preventDefault()
-              addFiles(picked)
-            }
-          }}
-          placeholder="输入指令…（Enter 发送 / Shift+Enter 换行，可拖拽或粘贴文件）"
-          className="max-h-[136px] min-h-[40px] flex-1 resize-none rounded-md border border-border/10 bg-background px-3 py-2.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring transition-[height] duration-150 ease-out"
-          rows={1}
-        />
-        <Button
-          size="icon"
-          className="size-10 shrink-0 rounded-full bg-primary text-primary-foreground hover:bg-primary/90"
-          onClick={send}
-          disabled={streaming || (!input.trim() && attachments.length === 0)}
-          aria-label="发送"
-        >
-          <Send className="size-4" />
-        </Button>
-      </div>
+          <textarea
+            ref={textRef}
+            value={input}
+            onChange={(e) => {
+              setInput(e.target.value)
+              autoSize(e.target)
+            }}
+            onKeyDown={(e) => {
+              if (
+                e.key === "Enter" &&
+                !e.shiftKey &&
+                !e.nativeEvent.isComposing &&
+                e.keyCode !== 229
+              ) {
+                e.preventDefault()
+                send()
+              }
+            }}
+            onPaste={(e) => {
+              // 支持直接粘贴截图 / 复制的文件
+              const items = Array.from(e.clipboardData?.items || [])
+              const picked = items
+                .filter((i) => i.kind === "file")
+                .map((i) => i.getAsFile())
+                .filter((f): f is File => !!f)
+              if (picked.length) {
+                e.preventDefault()
+                addFiles(picked)
+              }
+            }}
+            placeholder="给 LUMU 下指令…（Enter 发送）"
+            className="max-h-[136px] min-h-[40px] flex-1 resize-none bg-transparent px-1 py-2.5 font-mono text-sm text-[var(--text)] outline-none placeholder:text-[var(--dim)]"
+            rows={1}
+          />
+          {streaming ? (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-10 shrink-0 rounded-full text-[var(--danger)] hover:bg-[rgba(255,107,107,0.12)]"
+              onClick={stop}
+              aria-label="停止生成"
+              title="停止生成"
+            >
+              <Square className="size-4" />
+            </Button>
+          ) : (
+            <Button
+              size="icon"
+              className="size-10 shrink-0 rounded-full bg-primary text-primary-foreground hover:bg-primary/90"
+              onClick={send}
+              disabled={!input.trim() && attachments.length === 0}
+              aria-label="发送"
+            >
+              <Send className="size-4" />
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   )
 }

@@ -491,3 +491,37 @@ body {
     transform: none;
   }
 }
+
+/* 思考中指示点（终端感打字反馈，原 index.css 引用但未定义，此处补齐） */
+@keyframes pulse3 {
+  0%,
+  100% {
+    opacity: 0.2;
+    transform: scale(0.7);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+/* 终端光标闪烁 */
+@keyframes cursorblink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+/* 连接状态点轻微呼吸（非「呼吸球」装饰，仅状态指示） */
+@keyframes statpulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
