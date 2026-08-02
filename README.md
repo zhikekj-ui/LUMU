@@ -5,6 +5,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![CI](https://github.com/zhikekj-ui/LUMU/actions/workflows/ci.yml/badge.svg)](https://github.com/zhikekj-ui/LUMU/actions/workflows/ci.yml)
+[![Website](https://img.shields.io/badge/Website-lumux.cn-7fdcff)](https://lumux.cn)
+
+🔗 想看 LUMU 实际能做什么？上 [官网 lumux.cn](https://lumux.cn) 看完整能力清单，或预约一场真实环境演示。
 
 LUMU 不是又一个聊天窗口。它是一个**常驻在你私人服务器或本地机器上的智能体**：读写你的文件、跑你的终端命令、检索你的私有资料、把大任务拆开并行处理，并且**记得住你**——你的偏好、你纠正过它的地方、你项目里的约定，下次它直接照做。
 
