@@ -7,13 +7,14 @@
 用法:
     cd /opt/agent-framework && .venv/bin/python scripts/backfill_graph_vectors.py
 """
+import os
 import sqlite3
 import numpy as np
 from pathlib import Path
 
 from knowledge.embedding import get_embedding
 
-HOME = Path("/opt/agent-framework")
+HOME = Path(os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent)))
 DATA = HOME / "data"
 DIM = 512
 

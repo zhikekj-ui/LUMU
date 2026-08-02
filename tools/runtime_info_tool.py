@@ -155,8 +155,9 @@ def get_runtime_info() -> str:
     # ── 8. 版本与运行时长 ──
     try:
         import subprocess
+        _home = os.getenv("AGENT_HOME", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         commit = subprocess.run(
-            ["git", "-C", "/opt/agent-framework", "rev-parse", "--short", "HEAD"],
+            ["git", "-C", _home, "rev-parse", "--short", "HEAD"],
             capture_output=True, text=True, timeout=5,
         )
         git_commit = commit.stdout.strip() or "未知"

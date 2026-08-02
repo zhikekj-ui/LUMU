@@ -1,5 +1,6 @@
 """Admin operations API - system info, backup, monitoring."""
 import os
+import platform
 import subprocess
 import shutil
 import psutil
@@ -12,11 +13,11 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 @router.get("/system-info")
 async def get_system_info(admin: User = Depends(get_admin_user)):
-    disk = shutil.disk_usage("/")
+    disk = shutil.disk_usage(os.path.abspath(os.sep))
     mem = psutil.virtual_memory()
     return {
-        "hostname": os.uname().nodename,
-        "os": f"{os.uname().sysname} {os.uname().release}",
+        "hostname": platform.node(),
+        "os": f"{platform.system()} {platform.release()}",
         "cpu_count": psutil.cpu_count(),
         "cpu_percent": psutil.cpu_percent(interval=0.5),
         "memory": {
@@ -55,8 +56,9 @@ async def get_usage_stats(admin: User = Depends(get_admin_user)):
 
 @router.post("/backup")
 async def trigger_backup(admin: User = Depends(get_admin_user)):
+    _home = os.getenv("AGENT_HOME", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     result = subprocess.run(
-        ["/opt/agent-framework/scripts/backup.sh"],
+        [os.path.join(_home, "scripts", "backup.sh")],
         capture_output=True, text=True, timeout=300
     )
     if result.returncode == 0:
