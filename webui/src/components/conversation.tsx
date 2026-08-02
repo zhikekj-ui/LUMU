@@ -859,7 +859,7 @@ export function Conversation() {
 
   return (
     <div
-      className="relative flex min-h-0 flex-1 flex-col"
+      className="lumu-term relative flex min-h-0 flex-1 flex-col overflow-hidden"
       onDragEnter={(e) => {
         if (!Array.from(e.dataTransfer?.types || []).includes("Files")) return
         e.preventDefault()
@@ -899,10 +899,32 @@ export function Conversation() {
         </div>
       )}
 
+      {/* 终端窗口标题栏：交通灯 + 标题 + 连接状态 */}
+      <div className="term-bar">
+        <span className="term-lights" aria-hidden>
+          <i />
+          <i />
+          <i />
+        </span>
+        <span className="term-title">lumu@local: ~ — LUMU TERMINAL</span>
+        <span className={cn("term-status", backend === "online" ? "on" : backend === "offline" ? "off" : "wait")}>
+          <i />
+          {backend === "online" ? "在线" : backend === "offline" ? "离线" : "连接中"}
+        </span>
+      </div>
+
       <div
         ref={scrollRef}
         className="scroll-thin flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-4 py-4"
       >
+        {messages.length === 0 && (
+          <div className="term-welcome">
+            <p>Last login: {new Date().toLocaleString()} on lumu-local</p>
+            <p className="term-welcome-title">LUMU Terminal — 本地智能体控制台</p>
+            <p>输入指令开始工作。支持拖拽 / 粘贴文件、语音输入。</p>
+            <p className="term-welcome-hint">› 在下方输入框键入指令，Enter 发送</p>
+          </div>
+        )}
         {messages.map((m) => {
           return (
             <div
@@ -913,9 +935,7 @@ export function Conversation() {
               )}
             >
               {m.role === "assistant" && (
-                <div className="mr-2 mt-4 flex size-7 shrink-0 items-center justify-center rounded-full bg-cyan/15 text-[11px] font-semibold text-cyan">
-                  L
-                </div>
+                <span className="term-prompt asst mt-3 shrink-0 select-none">lumu ➜</span>
               )}
               <div className="flex max-w-[82%] flex-col gap-1">
                 {/* 气泡：用户=纯文本；助手=阶段块（段落 + 穿插的工具调用） */}
@@ -958,6 +978,7 @@ export function Conversation() {
                         )}
                         {body && (
                           <div className="whitespace-pre-wrap rounded-2xl bg-primary px-4 py-2.5 text-sm text-primary-foreground">
+                            <span className="term-prompt user">user@lumu ~ % </span>
                             {body}
                           </div>
                         )}
@@ -997,10 +1018,10 @@ export function Conversation() {
                                     {renderRich(b.text)}
                                   </div>
                                 ) : (
-                                  <span className="inline-block h-4 w-1.5 animate-pulse bg-muted-foreground/60 align-middle" />
+                                  <span className="term-caret" />
                                 )}
                                 {m.streaming && isLast && b.text && (
-                                  <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-cyan align-middle" />
+                                  <span className="term-caret" />
                                 )}
                               </div>
                             )
