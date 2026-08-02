@@ -87,11 +87,23 @@ export function SettingsView() {
       setSp(c.system_prompt || "")
       setTemp(c.provider_overrides?.temperature ?? 0.7)
       setTopP(c.provider_overrides?.top_p ?? 0.9)
-      setSelProvider(c.model_preference.provider)
-      setSelModel(c.model_preference.model)
+      setSelProvider(c.model_preference?.provider ?? "")
+      setSelModel(c.model_preference?.model ?? "")
       setChannels(ch.channels)
     } finally {
       setLoading(false)
+    }
+  }, [])
+
+  // 访问与分享：读取当前模式（定义在 useEffect 之前，避免 TDZ 崩溃）
+  const loadAccess = React.useCallback(async () => {
+    setAccessLoading(true)
+    try {
+      setAccessState(await fetchAccess())
+    } catch (e: any) {
+      toast.error("读取访问设置失败：" + String(e?.message || e))
+    } finally {
+      setAccessLoading(false)
     }
   }, [])
 
@@ -189,16 +201,6 @@ export function SettingsView() {
 
   // 访问与分享：读取 + 切换模式 + 复制 + 重新生成口令
   const accessMode = access?.mode ?? "local"
-  const loadAccess = React.useCallback(async () => {
-    setAccessLoading(true)
-    try {
-      setAccessState(await fetchAccess())
-    } catch (e: any) {
-      toast.error("读取访问设置失败：" + String(e?.message || e))
-    } finally {
-      setAccessLoading(false)
-    }
-  }, [])
   const copyLink = async () => {
     const link = access?.share_link || ""
     try {

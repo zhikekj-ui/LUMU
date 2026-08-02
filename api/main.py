@@ -1163,6 +1163,10 @@ async def get_config(_=Depends(verify_api_key)):
     tts = cfg.get("tts", {})
     if tts.get("mimo_api_key") and len(tts["mimo_api_key"]) > 8:
         tts["mimo_api_key"] = tts["mimo_api_key"][:4] + "****"
+    # 前端契约补全：旧配置文件可能缺这些键，缺则给默认值，避免设置页读取崩溃
+    cfg.setdefault("model_preference", get_model_preference())
+    cfg.setdefault("system_prompt", get_system_prompt())
+    cfg.setdefault("provider_overrides", {})
     return cfg
 
 
