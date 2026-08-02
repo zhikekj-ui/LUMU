@@ -2,7 +2,6 @@ import * as React from "react"
 import { Send, Wrench, Loader2, Check, ChevronDown, Copy, Mic, Square, Paperclip, X, Upload } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import { fetchHealth } from "@/lib/lumu"
 import { FileBlock, FileCard, splitFileLinks } from "@/components/file-card"
 import { useConversations } from "@/components/conversations"
 
@@ -353,19 +352,6 @@ export function Conversation() {
     ? active.messages
     : [GREETING]) as Msg[]
   const [input, setInput] = React.useState("")
-  // 当前模型标识（对话界面顶部固定展示，让用户在聊天页也能一眼看到用的是哪个模型）
-  const [curModel, setCurModel] = React.useState<{ provider?: string; model?: string } | null>(null)
-  React.useEffect(() => {
-    let alive = true
-    fetchHealth()
-      .then((d: any) => {
-        if (alive && d?.provider) setCurModel({ provider: d.provider, model: d.model })
-      })
-      .catch(() => {})
-    return () => {
-      alive = false
-    }
-  }, [])
   const [streaming, setStreaming] = React.useState(false)
   // 工具块展开状态：执行中转 true（阶段性展示）；做完转 false（折叠）；手动可切换
   const [expanded, setExpanded] = React.useState<Record<string, boolean>>({})
@@ -860,18 +846,6 @@ export function Conversation() {
           </div>
         </div>
       )}
-      {/* 当前模型标识：对话界面顶部固定显示，避免用户在聊天页看不到在用模型 */}
-      <div className="flex items-center gap-2 border-b border-white/[0.06] bg-background/60 px-4 py-2 text-xs">
-        <span className="inline-flex size-2 rounded-full bg-emerald-500" />
-        <span className="text-muted-foreground">当前模型</span>
-        {curModel ? (
-          <span className="font-mono text-[#7fdcff]">
-            {curModel.provider} / {curModel.model}
-          </span>
-        ) : (
-          <span className="text-muted-foreground/70">读取中…</span>
-        )}
-      </div>
 
       <div
         ref={scrollRef}
