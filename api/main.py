@@ -214,6 +214,67 @@ class MemoryRequest(BaseModel):
 
 
 # --- Routes ---
+# ---------------------------------------------------------------- 访问模式（小白开关：本机 / 对外分享）
+def _public_base(request: Request) -> str:
+    """根据反向代理头拼出当前可访问的基址（小白无需懂这个）。"""
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme or "http"
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    if host:
+        return f"{proto}://{host}".rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
+@app.get("/api/access")
+async def get_access(request: Request, _=Depends(verify_api_key)):
+    from core.access_guard import auth_disabled, request_is_exposed, get_token
+    exposed = request_is_exposed(request)
+    disabled = auth_disabled()
+    token = get_token(create=False)
+    base = _public_base(request)
+    link = f"{base}/?token={token}" if token else None
+    mode = "local" if (disabled or not exposed) else "share"
+    return JSONResponse({
+        "mode": mode, "exposed": exposed, "auth_disabled": disabled,
+        "token_present": bool(token), "share_link": link,
+    })
+
+
+@app.post("/api/access")
+async def post_access(request: Request, _=Depends(verify_api_key)):
+    from core.access_guard import rotate_token, get_token, request_is_exposed
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    action = (body.get("action") or "").strip()
+    base = _public_base(request)
+    if action == "enable":
+        token = get_token(create=True)
+        return JSONResponse({"ok": True, "mode": "share", "share_link": f"{base}/?token={token}"})
+    if action == "rotate":
+        token = rotate_token()
+        return JSONResponse({"ok": True, "mode": "share", "share_link": f"{base}/?token={token}"})
+    if action == "disable":
+        if request_is_exposed(request):
+            raise HTTPException(status_code=400,
+                detail="实例已对外暴露，出于安全不能关闭口令（否则任何人都能直接调用后台）。请保持对外分享模式。")
+        return JSONResponse({"ok": True, "mode": "local", "share_link": None})
+    raise HTTPException(status_code=400, detail="未知 action：" + action)
+
+
+@app.post("/api/access/activate")
+async def activate_access(request: Request):
+    """首次打开的机器：点一下"确认进入"即自动激活本机口令（种 cookie），无需任何链接或终端。"""
+    from core.access_guard import get_token
+    token = get_token(create=True)
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie(
+        "lumu_token", token,
+        max_age=31536000, httponly=True, samesite="lax", path="/",
+    )
+    return resp
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     html = (STATIC_DIR / "index.html").read_text()
