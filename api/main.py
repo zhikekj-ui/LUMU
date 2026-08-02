@@ -1170,6 +1170,17 @@ async def get_config(_=Depends(verify_api_key)):
     return cfg
 
 
+def _resolve_enabled_models(provider, configured, has_key):
+    """已配置 API Key 的供应商若未显式设置 enabled_models，回退到该供应商的默认模型列表。
+    这样前端 TopBar 下拉切换模型时，至少能看到当前供应商可用的全部模型（而非空列表）。
+    未配置 key 的供应商不参与 fallback（保持 enabled_models=[]，前端过滤后才显示）。"""
+    configured = list(configured) if isinstance(configured, list) else []
+    if configured:
+        return configured
+    if has_key and getattr(provider, "models", None):
+        return list(provider.models)
+    return []
+
 @app.get("/api/config/providers")
 async def get_provider_configs(_=Depends(verify_api_key)):
     """List all providers with their configuration status."""
@@ -1190,7 +1201,7 @@ async def get_provider_configs(_=Depends(verify_api_key)):
             "active_base_url": p.resolve_base_url(),
             "active_protocol": ("anthropic" if ("/anthropic" in p.resolve_base_url() or p.resolve_base_url().rstrip("/").endswith("/api/coding")) else "openai"),
             "api_key_preview": (key[:4] + "****" + key[-4:]) if has_key and len(key) > 8 else ("已配置" if has_key else ""),
-            "enabled_models": get_enabled_models(p.name),
+            "enabled_models": _resolve_enabled_models(p, get_enabled_models(p.name), has_key),
         })
     return {"providers": result, "total": len(result), "system_prompt": get_system_prompt()}
 
