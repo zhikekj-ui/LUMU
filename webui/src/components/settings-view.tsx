@@ -194,6 +194,8 @@ export function SettingsView() {
       await setProviderKey(name, k)
       setKeyMsg("已更新 " + name + " 的 API Key")
       setKeys((s) => ({ ...s, [name]: "" }))
+      await load() // 刷新配置，模型区立即出现该供应商，无需手动刷新页面
+      setSelProvider((prev) => prev || name) // 若还没选中供应商，自动选中刚配好的这家
     } catch (e: any) {
       setKeyMsg("更新失败：" + String(e?.message || e))
     }
@@ -259,6 +261,11 @@ export function SettingsView() {
             <CardDescription>仅显示已配置 API Key 的供应商</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
+            {configured.length === 0 && (
+              <p className="rounded-md border border-dashed border-border bg-white/5 px-3 py-2 text-sm text-muted-foreground">
+                还没有配置任何供应商密钥。先在下方的「供应商 API Key」填入一个密钥并保存，这里就能选择模型了。
+              </p>
+            )}
             <div className="space-y-1.5">
               <Label>供应商</Label>
               <Select value={selProvider} onValueChange={setSelProvider}>
