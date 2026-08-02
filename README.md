@@ -62,6 +62,8 @@ cp .env.example .env
 python run.py
 ```
 
+> 启动后**保持这个终端窗口打开**，服务就会一直运行（不要直接关闭窗口或按 Ctrl+C，否则服务会停下）。想长期常驻、开机自启，见下方「守护进程」一节。
+
 打开 `http://127.0.0.1:38473` 即可使用。首次进入在「设置 → 模型」里填一个模型 Key 就能对话。
 数据默认落在项目目录的 `data/`（Windows / macOS / Linux 三端通用，无需任何额外设置）；想自定义位置，设环境变量 `AGENT_HOME` 指向你的目录即可。
 
@@ -77,6 +79,70 @@ docker compose logs -f agent      # 查看启动日志
 容器默认只绑定宿主机环回地址（`127.0.0.1:38473`），局域网访问不到。
 
 > 容器内服务默认绑 `0.0.0.0`，端口边界由 compose 的 `ports` 控制；**默认打开即用、零门禁、无需口令**。
+
+---
+
+## 守护进程（开机自启、崩溃自动重启）
+
+本地 `python run.py` 是前台进程，关掉终端窗口服务就停。想让它像普通软件一样一直常驻，用系统守护进程挂上即可——服务器（154）线上长期稳定运行用的就是这种方式。
+
+### macOS（launchd）
+
+把下面的内容存成 `~/Library/LaunchAgents/com.lumu.local.plist`（把 `dakuang` 换成你的用户名，`.venv/bin/python` 指向你的虚拟环境）：
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.lumu.local</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>WorkingDirectory</key><string>/Users/dakuang/LUMU</string>
+  <key>UserName</key><string>dakuang</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/dakuang/LUMU/.venv/bin/python</string>
+    <string>run.py</string>
+  </array>
+  <key>StandardOutPath</key><string>/Users/dakuang/LUMU/data/lumu.log</string>
+  <key>StandardErrorPath</key><string>/Users/dakuang/LUMU/data/lumu.err</string>
+</dict>
+</plist>
+```
+
+注册并启动（只需执行一次，之后登录自动拉起、崩溃自动重启）：
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.lumu.local.plist
+```
+
+停止：`launchctl unload ~/Library/LaunchAgents/com.lumu.local.plist`，再删掉该 plist 文件即可。
+
+### Linux（systemd）
+
+存成 `/etc/systemd/system/lumu.service`（路径按你的部署目录调整）：
+
+```ini
+[Unit]
+Description=LUMU Agent
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/agent-framework
+ExecStart=/opt/agent-framework/.venv/bin/python run.py
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now lumu.service
+```
+
+不想折腾守护进程？直接用上方的 **Docker 方式二**，容器本身就在后台常驻。
 
 ---
 
