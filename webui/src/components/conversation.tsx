@@ -941,9 +941,6 @@ export function Conversation() {
                 m.role === "user" ? "justify-end" : "justify-start"
               )}
             >
-              {m.role === "assistant" && (
-                <span className="term-prompt asst mt-3 shrink-0 select-none">lumu ➜</span>
-              )}
               <div className="flex max-w-[82%] flex-col gap-1">
                 {/* 气泡：用户=纯文本；助手=阶段块（段落 + 穿插的工具调用） */}
                 {m.role === "user" ? (
@@ -985,7 +982,6 @@ export function Conversation() {
                         )}
                         {body && (
                           <div className="text-sm leading-relaxed">
-                            <span className="term-prompt user">user@lumu ~ %</span>
                             <span className="whitespace-pre-wrap text-foreground">{body}</span>
                           </div>
                         )}
