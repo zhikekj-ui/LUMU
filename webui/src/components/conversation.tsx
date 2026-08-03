@@ -912,20 +912,6 @@ export function Conversation() {
         </div>
       )}
 
-      {/* 终端窗口标题栏：交通灯 + 标题 + 连接状态 */}
-      <div className="term-bar">
-        <span className="term-lights" aria-hidden>
-          <i />
-          <i />
-          <i />
-        </span>
-        <span className="term-title">lumu@local: ~ — LUMU TERMINAL</span>
-        <span className={cn("term-status", backend === "online" ? "on" : backend === "offline" ? "off" : "wait")}>
-          <i />
-          {backend === "online" ? "在线" : backend === "offline" ? "离线" : "连接中"}
-        </span>
-      </div>
-
       <div
         ref={scrollRef}
         className="scroll-thin flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-4 py-4"
