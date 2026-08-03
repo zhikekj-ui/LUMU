@@ -977,16 +977,16 @@ export function Conversation() {
                           </div>
                         )}
                         {body && (
-                          <div className="whitespace-pre-wrap rounded-2xl bg-primary px-4 py-2.5 text-sm text-primary-foreground">
-                            <span className="term-prompt user">user@lumu ~ % </span>
-                            {body}
+                          <div className="text-sm leading-relaxed">
+                            <span className="term-prompt user">user@lumu ~ %</span>
+                            <span className="whitespace-pre-wrap text-foreground">{body}</span>
                           </div>
                         )}
                       </div>
                     )
                   })()
                 ) : (
-                  <div className="rounded-2xl border border-white/[0.06] bg-sidebar/40 px-4 py-3 text-sm leading-relaxed text-foreground">
+                  <div className="text-sm leading-relaxed">
                     {(m.blocks || []).length === 0 ? m.streaming ? (
                       <div className="flex items-center gap-2 py-0.5 text-[var(--faint)]">
                         <span className="flex gap-1">
