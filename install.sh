@@ -73,13 +73,38 @@ esac
 
 # 3) 虚拟环境 + 依赖
 cd "$LUMU_DIR"
+# 半成品 venv（缺 python）比没有更糟，直接重建
+if [ -d .venv ] && [ ! -x .venv/bin/python ]; then
+  rm -rf .venv
+fi
 if [ ! -d .venv ]; then
   echo "→ 创建虚拟环境..."
-  python3 -m venv .venv
+  if ! python3 -m venv .venv || [ ! -x .venv/bin/python ]; then
+    rm -rf .venv
+    python3 -m venv --copies .venv
+  fi
 fi
+if [ ! -x .venv/bin/python ]; then
+  echo "✗ 虚拟环境创建失败，请手动执行: python3 -m venv $LUMU_DIR/.venv"
+  exit 1
+fi
+
 echo "→ 安装依赖（首次稍慢，请稍候）..."
 .venv/bin/python -m pip install -U pip >/dev/null 2>&1 || true
-.venv/bin/pip install -r requirements.txt
+PIP_OK=0
+for IDX in "https://pypi.tuna.tsinghua.edu.cn/simple" "https://mirrors.aliyun.com/pypi/simple" "https://pypi.org/simple"; do
+  echo "  使用源: $IDX"
+  if .venv/bin/python -m pip install -r requirements.txt -i "$IDX" --retries 3 --timeout 60; then
+    PIP_OK=1
+    break
+  fi
+  echo "  该源失败，换下一个..."
+done
+if [ "$PIP_OK" -ne 1 ]; then
+  echo "✗ 依赖安装失败（所有源均不可用），请检查网络后手动执行:"
+  echo "  cd $LUMU_DIR && .venv/bin/python -m pip install -r requirements.txt"
+  exit 1
+fi
 
 # 4) 注册极简启动命令 `lumu`
 cat > "$LUMU_DIR/lumu" <<'LAUNCHER'

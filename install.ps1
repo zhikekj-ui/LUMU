@@ -1,6 +1,6 @@
 # LUMU One-click Installer (Windows)
 # Self-contained distribution: downloads from lumux.cn, no GitHub needed.
-# Python is auto-installed if missing — no manual setup required.
+# Python is auto-installed if missing - no manual setup required.
 # Install:  iwr https://lumux.cn/install.ps1 -useb | iex
 # Update:  lumu update
 $ErrorActionPreference = "Stop"
@@ -24,7 +24,7 @@ $DL = "https://lumux.cn/downloads/lumu-latest.zip"
 
 # ---- Resolve a usable python executable (full path), or $null ----
 function Resolve-Py {
-  # Prefer Python Launcher (py.exe) — always the real interpreter on Windows
+  # Prefer Python Launcher (py.exe) - always the real interpreter on Windows
   try {
     $p = (& py -3 -c "import sys;print(sys.executable)" 2>$null).ToString().Trim()
     if ($p -and (Test-Path $p)) {
@@ -152,24 +152,86 @@ if ($isUpdate -and (Test-Path (Join-Path $LUMU_DIR "run.py"))) {
   Apply-Package $z
 }
 
-# venv + dependencies
-if (-not (Test-Path (Join-Path $LUMU_DIR ".venv"))) {
+# ---- venv + dependencies ----
+# NOTE: never pass -ErrorAction to an EXTERNAL program (& python ...) - it is a
+# cmdlet-only parameter and would be forwarded to python as a literal argument.
+# Native commands are checked via $LASTEXITCODE + artifact existence instead.
+$ErrorActionPreference = "Continue"
+try { $PSNativeCommandUseErrorActionPreference = $false } catch {}
+
+$venvDir = Join-Path $LUMU_DIR ".venv"
+$venvPy  = Join-Path $venvDir "Scripts\python.exe"
+
+# A half-created venv (no python.exe) is worse than none - wipe it.
+if ((Test-Path $venvDir) -and (-not (Test-Path $venvPy))) {
+  Remove-Item $venvDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+if (Test-Path $venvPy) {
+  Write-Host "[4/5] Virtual environment already exists, skipping."
+} else {
   Write-Host "[4/5] Creating virtual environment..."
-  try {
-    & $PYTHON -m venv (Join-Path $LUMU_DIR ".venv") -ErrorAction Stop
-  } catch {
-    Write-Host "ERROR: venv creation failed: $_" -ForegroundColor Red
+  & $PYTHON -m venv $venvDir
+  if (-not (Test-Path $venvPy)) {
+    Write-Host "  First attempt failed, retrying with --copies..." -ForegroundColor Yellow
+    Remove-Item $venvDir -Recurse -Force -ErrorAction SilentlyContinue
+    & $PYTHON -m venv --copies $venvDir
+  }
+  if (-not (Test-Path $venvPy)) {
+    Write-Host "ERROR: Failed to create virtual environment at $venvDir" -ForegroundColor Red
+    Write-Host "Try manually: `"$PYTHON`" -m venv `"$venvDir`"" -ForegroundColor Yellow
     exit 1
   }
+  Write-Host "OK: Virtual environment ready" -ForegroundColor Green
 }
+
 Write-Host "[5/5] Installing dependencies (first time takes a while)..."
-try {
-  & (Join-Path $LUMU_DIR ".venv\Scripts\python.exe") -m pip install -r (Join-Path $LUMU_DIR "requirements.txt") -ErrorAction Stop
-} catch {
-  Write-Host "ERROR: pip install failed: $_" -ForegroundColor Red
-  Write-Host "Try manually: cd $LUMU_DIR ; .venv\Scripts\pip install -r requirements.txt" -ForegroundColor Yellow
+$req = Join-Path $LUMU_DIR "requirements.txt"
+if (-not (Test-Path $req)) {
+  Write-Host "ERROR: requirements.txt not found in $LUMU_DIR" -ForegroundColor Red
   exit 1
 }
+
+# Try a fast domestic mirror first, then fall back to the official PyPI.
+$mirrors = @(
+  @{ Name = "tsinghua"; Url = "https://pypi.tuna.tsinghua.edu.cn/simple"; Host = "pypi.tuna.tsinghua.edu.cn" },
+  @{ Name = "aliyun";   Url = "https://mirrors.aliyun.com/pypi/simple";   Host = "mirrors.aliyun.com" },
+  @{ Name = "pypi";     Url = "https://pypi.org/simple";                  Host = "pypi.org" }
+)
+
+$firstUrl = $mirrors[0].Url
+$firstHost = $mirrors[0].Host
+& $venvPy -m pip install --upgrade pip --quiet --disable-pip-version-check -i $firstUrl --trusted-host $firstHost 2>$null
+
+$pipOk = $false
+foreach ($m in $mirrors) {
+  $idxUrl = $m.Url
+  $idxHost = $m.Host
+  Write-Host "  Using index: $($m.Name) ..."
+  & $venvPy -m pip install -r $req --disable-pip-version-check -i $idxUrl --trusted-host $idxHost --retries 3 --timeout 60
+  if ($LASTEXITCODE -eq 0) { $pipOk = $true; break }
+  Write-Host "  $($m.Name) failed, trying next index..." -ForegroundColor Yellow
+}
+
+if (-not $pipOk) {
+  Write-Host "ERROR: pip install failed on all mirrors." -ForegroundColor Red
+  Write-Host "Try manually: cd `"$LUMU_DIR`" ; .venv\Scripts\python.exe -m pip install -r requirements.txt" -ForegroundColor Yellow
+  exit 1
+}
+
+# Self-verification: the install is only "done" if the app can actually load.
+if (-not (Test-Path (Join-Path $LUMU_DIR "run.py"))) {
+  Write-Host "ERROR: run.py missing - package incomplete." -ForegroundColor Red
+  exit 1
+}
+& $venvPy -c "import fastapi, uvicorn, httpx" 2>$null
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "ERROR: Core dependencies are not importable - install is incomplete." -ForegroundColor Red
+  Write-Host "Try manually: cd `"$LUMU_DIR`" ; .venv\Scripts\python.exe -m pip install -r requirements.txt" -ForegroundColor Yellow
+  exit 1
+}
+Write-Host "OK: Dependencies installed and verified" -ForegroundColor Green
+$ErrorActionPreference = "Stop"
 
 # Save install.ps1 locally for future updates
 $me = $MyInvocation.MyCommand.Path
@@ -182,7 +244,7 @@ $lumat = Join-Path $LUMU_DIR "lumu.bat"
 @"
 @echo off
 set LUMU_DIR=%USERPROFILE%\LUMU
-if "%1"=="update" ( powershell -ExecutionPolicy Bypass "%LUMU_DIR%\install.ps1" update & goto :eof )
+if "%1"=="update" ( powershell -NoProfile -ExecutionPolicy Bypass -File "%LUMU_DIR%\install.ps1" update & goto :eof )
 "%LUMU_DIR%\.venv\Scripts\python.exe" "%LUMU_DIR%\run.py" %*
 "@ | Set-Content -Encoding ascii $lumat
 
