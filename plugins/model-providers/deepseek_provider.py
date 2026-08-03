@@ -11,4 +11,5 @@ register(ProviderProfile(
     fallback_models=["deepseek-v4-flash"],
     context_window=128_000,
     anthropic_base_url="https://api.deepseek.com/anthropic",
+    supports_vision=False,
 ))

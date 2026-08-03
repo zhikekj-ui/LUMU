@@ -1411,6 +1411,8 @@ class Agent:
             messages.append({"role": "user", "content": user_message + _note})
         else:
             messages.append({"role": "user", "content": user_message})
+        # 纯文本模型（如 DeepSeek）不支持 image_url：发送前剥离历史/当前消息里的图片块，防 400
+        messages = self._strip_images_from_messages(messages)
         return messages
 
     def _user_turn_content(self, user_message, images, image_caption):
@@ -1429,6 +1431,44 @@ class Agent:
                 _parts.append({"type": "image_url", "image_url": {"url": _u}})
             return _parts
         return user_message
+
+    def _strip_images_from_messages(self, messages):
+        """主模型不支持视觉时，自动剥离消息里的图片多模态块，避免 400。
+
+        触发场景：用户用支持图的模型产生了含 ``image_url`` 的历史消息，
+        之后切到纯文本模型（如 DeepSeek）继续对话，框架会把整段历史原样
+        发给新模型，新模型在解析 ``messages[N]`` 时遇到 ``image_url`` 报
+        ``unknown variant`` 并拒绝整个请求。
+
+        处理：仅当 ``provider.supports_vision`` 为 False 时生效——遍历每条
+        消息，删掉 ``image_url`` / ``image`` 块、保留 ``text``；纯图消息降级为
+        占位说明。只作用于发送负载（已做拷贝），不污染持久化会话历史。
+        """
+        if getattr(self.provider, "supports_vision", False):
+            return messages
+        _out = []
+        for _m in messages:
+            if not isinstance(_m, dict):
+                _out.append(_m)
+                continue
+            _m = dict(_m)  # 拷贝，避免改动持久化的 session.messages
+            _c = _m.get("content")
+            if isinstance(_c, list):
+                _texts = []
+                for _part in _c:
+                    if not isinstance(_part, dict):
+                        continue
+                    _t = _part.get("type")
+                    if _t in ("image_url", "image"):
+                        continue  # 剥离图片块（OpenAI / Anthropic 两种格式）
+                    if _t == "text":
+                        _texts.append(_part.get("text") or "")
+                    elif isinstance(_part.get("text"), str):
+                        _texts.append(_part["text"])
+                _joined = "\n".join(t for t in _texts if t).strip()
+                _m["content"] = _joined if _joined else "[图片内容已省略：当前模型不支持视觉输入]"
+            _out.append(_m)
+        return _out
 
     def _process_attachments(self, files, space):
         """通用文件附件处理：返回 (img_b64_list, extra_text)。
