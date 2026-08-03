@@ -1,5 +1,6 @@
 # LUMU One-click Installer (Windows)
-# Self-contained distribution: downloads from lumux.cn, no GitHub needed
+# Self-contained distribution: downloads from lumux.cn, no GitHub needed.
+# Python is auto-installed if missing — no manual setup required.
 # Install:  iwr https://lumux.cn/install.ps1 -useb | iex
 # Update:  lumu update
 $ErrorActionPreference = "Stop"
@@ -21,46 +22,55 @@ try {
 $LUMU_DIR = if ($env:LUMU_DIR) { $env:LUMU_DIR } else { Join-Path $HOME "LUMU" }
 $DL = "https://lumux.cn/downloads/lumu-latest.zip"
 
-# ---- Resolve real python (avoid Microsoft Store alias) ----
+# ---- Resolve a usable python executable (full path), or $null ----
 function Resolve-Py {
-  # Prefer Python Launcher (py.exe) — always real python on Windows
-  if (Get-Command py -ErrorAction SilentlyContinue) { return "py -3" }
-  $c = Get-Command python -ErrorAction SilentlyContinue
-  if ($c) {
-    $src = $c.Source
-    if ($src -like "*WindowsApps*") {
-      Write-Host "ERROR: 'python' is the Microsoft Store ALIAS, not real Python." -ForegroundColor Red
-      Write-Host "Fix: Settings > Apps > Advanced app settings > App execution aliases" -ForegroundColor Yellow
-      Write-Host "      Turn OFF 'python.exe' and 'python3.exe', then:" -ForegroundColor Yellow
-      Write-Host "      Install Python 3.11+ from https://www.python.org/downloads/ (check 'Add to PATH')." -ForegroundColor Yellow
-      exit 1
+  # Prefer Python Launcher (py.exe) — always the real interpreter on Windows
+  try {
+    $p = (& py -3 -c "import sys;print(sys.executable)" 2>$null).ToString().Trim()
+    if ($p -and (Test-Path $p)) {
+      $v = (& $p --version 2>&1).ToString().Trim()
+      if ($v -match '(\d+)\.(\d+)' -and [version]"$($Matches[1]).$($Matches[2])" -ge [version]"3.11") {
+        return $p
+      }
     }
-    return "python"
+  } catch {}
+  # Fall back to python / python3 (skip the Microsoft Store alias)
+  foreach ($cmd in @("python", "python3")) {
+    try {
+      $c = Get-Command $cmd -ErrorAction SilentlyContinue
+      if ($c -and $c.Source -notlike "*WindowsApps*") {
+        $p = $c.Source
+        $v = (& $p --version 2>&1).ToString().Trim()
+        if ($v -match '(\d+)\.(\d+)' -and [version]"$($Matches[1]).$($Matches[2])" -ge [version]"3.11") {
+          return $p
+        }
+      }
+    } catch {}
   }
-  Write-Host "ERROR: python not found in PATH." -ForegroundColor Red
-  Write-Host "Install Python 3.11+ from https://www.python.org/downloads/ (check 'Add to PATH')." -ForegroundColor Yellow
-  exit 1
+  return $null
 }
 
-function Test-Py($pyCmd) {
-  Write-Host "[1/5] Checking Python..."
+# ---- Auto-install Python if missing (current user, no admin needed) ----
+function Install-Python {
+  $ver = "3.12.7"
+  $url = "https://www.python.org/ftp/python/$ver/python-$ver-amd64.exe"
+  $inst = Join-Path $env:TEMP "python-$ver-installer.exe"
   try {
-    $raw = (& $pyCmd --version 2>&1).ToString().Trim()
-    if ($raw -match '(\d+)\.(\d+)') {
-      $v = "$($Matches[1]).$($Matches[2])"
-    } else {
-      throw "cannot parse version from: $raw"
-    }
+    Write-Host "  Downloading Python $ver installer..."
+    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $inst -ErrorAction Stop
+    $sz = (Get-Item $inst -ErrorAction SilentlyContinue).Length
+    if ((-not $sz) -or $sz -lt 1MB) { throw "installer too small ($sz bytes)" }
+    Write-Host "  Installing Python (silent, one-time)..."
+    Start-Process -FilePath $inst -ArgumentList "/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_test=0" -Wait -ErrorAction Stop
+    Remove-Item $inst -Force -ErrorAction SilentlyContinue
+    # Refresh PATH so the freshly installed python is found in this session
+    $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
+    Write-Host "OK: Python installed automatically." -ForegroundColor Green
   } catch {
-    Write-Host "ERROR: python execution failed: $_" -ForegroundColor Red
-    Write-Host "If you just disabled the Store alias, please RESTART PowerShell first." -ForegroundColor Yellow
+    Write-Host "ERROR: Failed to auto-install Python: $_" -ForegroundColor Red
+    Write-Host "Please install Python 3.11+ manually from https://www.python.org/downloads/ (check 'Add to PATH'), then re-run this installer." -ForegroundColor Yellow
     exit 1
   }
-  if ([version]$v -lt [version]"3.11") {
-    Write-Host "ERROR: Python version too low ($v), need 3.11+" -ForegroundColor Red
-    exit 1
-  }
-  Write-Host "OK: Python $v ($pyCmd)" -ForegroundColor Green
 }
 
 function Get-Zip {
@@ -114,8 +124,21 @@ Write-Host "  LUMU Installer (Windows)"
 Write-Host "============================================"
 Write-Host ""
 
-$pyCmd = Resolve-Py
-Test-Py $pyCmd
+# ---- [1/5] Python check (auto-install if missing) ----
+Write-Host "[1/5] Checking Python..."
+$PYTHON = Resolve-Py
+if (-not $PYTHON) {
+  Write-Host "  Python not found. Auto-installing (one-time)..."
+  Install-Python
+  $PYTHON = Resolve-Py
+}
+if (-not $PYTHON) {
+  Write-Host "ERROR: still cannot find Python after install." -ForegroundColor Red
+  exit 1
+}
+$ver = (& $PYTHON --version 2>&1).ToString().Trim()
+if ($ver -match '(\d+)\.(\d+)') { $v = "$($Matches[1]).$($Matches[2])" } else { $v = "?" }
+Write-Host "OK: Python $v" -ForegroundColor Green
 
 if ($isUpdate -and (Test-Path (Join-Path $LUMU_DIR "run.py"))) {
   $z = Get-Zip
@@ -133,7 +156,7 @@ if ($isUpdate -and (Test-Path (Join-Path $LUMU_DIR "run.py"))) {
 if (-not (Test-Path (Join-Path $LUMU_DIR ".venv"))) {
   Write-Host "[4/5] Creating virtual environment..."
   try {
-    & $pyCmd -m venv (Join-Path $LUMU_DIR ".venv") -ErrorAction Stop
+    & $PYTHON -m venv (Join-Path $LUMU_DIR ".venv") -ErrorAction Stop
   } catch {
     Write-Host "ERROR: venv creation failed: $_" -ForegroundColor Red
     exit 1
