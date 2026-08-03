@@ -1,6 +1,13 @@
 """Entry point - run the agent framework server."""
 import os
 import sys
+import asyncio
+
+# Windows 异步事件循环策略：playwright / aiohttp 等库在默认 ProactorEventLoop
+# 下首次真正异步调用容易抛未捕获异常（裸 500）。切到 SelectorEventLoop 是其官方
+# 要求的做法，Mac/Linux 不受影响（策略仅在 win32 设置）。
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # 确保 AGENT_HOME 兜底为项目根目录：普通用户直接 `python run.py` 不会设该变量，
 # 多处模块依赖它做路径解析，必须在入口处设好，避免静默退化。

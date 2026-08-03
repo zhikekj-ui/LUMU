@@ -4,6 +4,7 @@ import os
 import re
 import io
 import asyncio
+import traceback
 from slowapi.errors import RateLimitExceeded
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from middleware.rate_limit import limiter, rate_limit_exceeded_handler
@@ -107,6 +108,36 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Agent Framework", version="0.5.0", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
+
+# ── 全局异常兜底 ──
+# 把未捕获异常从「裸 Internal Server Error」转为带真实错误信息的 JSON，
+# 并完整写入 data/lumu_server.log，避免普通用户面对一句无意义的 500 无从排查。
+def _dump_traceback(request: "Request", exc: Exception):
+    stack = traceback.format_exc()
+    try:
+        _home = os.getenv("AGENT_HOME", str(Path(__file__).resolve().parent.parent))
+        _log_dir = os.path.join(_home, "data")
+        os.makedirs(_log_dir, exist_ok=True)
+        with open(os.path.join(_log_dir, "lumu_server.log"), "a", encoding="utf-8") as _lf:
+            _lf.write(
+                f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                f"{getattr(request, 'method', '?')} {getattr(request, 'url', '')}\n{stack}\n"
+            )
+    except Exception:
+        pass
+    return stack
+
+
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: "Request", exc: Exception):
+    if isinstance(exc, HTTPException):
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    _dump_traceback(request, exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {exc}"},
+    )
 
 # Let plugins register API routes
 plugin_loader.register_routes(app)
