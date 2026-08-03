@@ -40,6 +40,7 @@ import {
   switchModel,
   saveParams,
   setProviderKey,
+  setProviderBaseUrl,
   fetchChannelsConfig,
   saveChannelsConfig,
   fetchAccess,
@@ -62,6 +63,8 @@ export function SettingsView() {
   const [selProvider, setSelProvider] = React.useState("")
   const [selModel, setSelModel] = React.useState("")
   const [keys, setKeys] = React.useState<Record<string, string>>({})
+  const [baseUrls, setBaseUrls] = React.useState<Record<string, string>>({})
+  const [baseUrlMsg, setBaseUrlMsg] = React.useState<string | null>(null)
   const [keyMsg, setKeyMsg] = React.useState<string | null>(null)
 
   // 渠道接入
@@ -89,6 +92,7 @@ export function SettingsView() {
       setTopP(c.provider_overrides?.top_p ?? 0.9)
       setSelProvider(c.model_preference?.provider ?? "")
       setSelModel(c.model_preference?.model ?? "")
+      setBaseUrls(Object.fromEntries(p.providers.map((x: any) => [x.name, x.active_base_url || ""])))
       setChannels(ch.channels)
     } finally {
       setLoading(false)
@@ -198,6 +202,21 @@ export function SettingsView() {
       setSelProvider((prev) => prev || name) // 若还没选中供应商，自动选中刚配好的这家
     } catch (e: any) {
       setKeyMsg("更新失败：" + String(e?.message || e))
+    }
+  }
+
+  // 自定义 Base URL（OpenAI 兼容）：例如把 openai 供应商指向中转/自建网关
+  const onSetBaseUrl = async (name: string) => {
+    const v = (baseUrls[name] ?? "").trim()
+    try {
+      await setProviderBaseUrl(name, v)
+      setBaseUrlMsg(
+        v ? "已更新 " + name + " 的 Base URL：" + v : "已清除 " + name + " 的自定义 Base URL（恢复默认）"
+      )
+      setTimeout(() => setBaseUrlMsg(null), 2500)
+      await load()
+    } catch (e: any) {
+      setBaseUrlMsg("更新失败：" + String(e?.message || e))
     }
   }
 
@@ -368,29 +387,54 @@ export function SettingsView() {
         </CardHeader>
         <CardContent className="space-y-3">
           {providers.map((p) => (
-            <div key={p.name} className="flex flex-wrap items-center gap-2">
-              <span className="w-36 text-sm font-medium">{p.display_name}</span>
-              <Badge
-                variant="outline"
-                className={
-                  "font-mono text-xs " +
-                  (p.api_key_configured ? "border-emerald-500/40 text-emerald-300" : "")
-                }
-              >
-                <IconKey className="mr-1 size-3" />
-                {p.api_key_configured ? (p.api_key_preview || "已配置") : "未配置"}
-              </Badge>
-              <Input
-                placeholder="输入新的 API Key"
-                value={keys[p.name] || ""}
-                onChange={(e) => setKeys((s) => ({ ...s, [p.name]: e.target.value }))}
-                className="max-w-xs"
-              />
-              <Button size="sm" variant="outline" onClick={() => onSetKey(p.name)} disabled={!keys[p.name]}>
-                更新
-              </Button>
+            <div key={p.name} className="rounded-lg border border-border bg-white/[0.03] p-3 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-sm font-medium">{p.display_name}</span>
+                <Badge
+                  variant="outline"
+                  className={
+                    "font-mono text-xs " +
+                    (p.api_key_configured ? "border-emerald-500/40 text-emerald-300" : "")
+                  }
+                >
+                  <IconKey className="mr-1 size-3" />
+                  {p.api_key_configured ? (p.api_key_preview || "已配置") : "未配置"}
+                </Badge>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  placeholder="输入新的 API Key"
+                  value={keys[p.name] || ""}
+                  onChange={(e) => setKeys((s) => ({ ...s, [p.name]: e.target.value }))}
+                  className="max-w-xs flex-1"
+                />
+                <Button size="sm" variant="outline" onClick={() => onSetKey(p.name)} disabled={!keys[p.name]}>
+                  更新
+                </Button>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  placeholder="Base URL（OpenAI 兼容，留空用默认）"
+                  value={baseUrls[p.name] ?? ""}
+                  onChange={(e) => setBaseUrls((s) => ({ ...s, [p.name]: e.target.value }))}
+                  className="max-w-md flex-1 font-mono text-xs"
+                />
+                <Button size="sm" variant="outline" onClick={() => onSetBaseUrl(p.name)}>
+                  保存地址
+                </Button>
+              </div>
+              {p.active_base_url && (
+                <p className="text-[11px] leading-relaxed text-muted-foreground/70">
+                  当前生效地址：{p.active_base_url}
+                </p>
+              )}
             </div>
           ))}
+          {baseUrlMsg && (
+            <div className="rounded-md border border-border bg-white/5 px-3 py-2 text-sm text-foreground/90">
+              {baseUrlMsg}
+            </div>
+          )}
         </CardContent>
       </Card>
 

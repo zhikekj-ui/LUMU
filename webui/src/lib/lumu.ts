@@ -50,6 +50,9 @@ export interface Provider {
   models: string[]
   enabled_models: string[]
   api_key_configured: boolean
+  api_key_preview?: string
+  base_url?: string
+  active_base_url?: string
 }
 
 export async function fetchProviders(): Promise<{ providers: Provider[] }> {
@@ -250,6 +253,9 @@ export async function saveParams(p: { temperature: number; top_p: number }) {
 }
 export async function setProviderKey(provider: string, key: string) {
   return (await req(`/config/provider/${encodeURIComponent(provider)}/key`, { method: "POST", body: JSON.stringify({ api_key: key }) })).json()
+}
+export async function setProviderBaseUrl(provider: string, baseUrl: string) {
+  return (await req(`/config/provider/${encodeURIComponent(provider)}/base-url`, { method: "POST", body: JSON.stringify({ base_url: baseUrl }) })).json()
 }
 
 // ---------------- 产品级用户反馈（个人市场反馈闭环） ----------------

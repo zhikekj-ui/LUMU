@@ -1705,7 +1705,7 @@ class Agent:
             except Exception as _e:
                 _log("[reasoning] engine init failed: %s" % _e)
                 _engine = None
-        if len(user_message.strip()) >= 30 and _engine is not None and hasattr(_engine, "auto_reason"):
+        if (not self._is_lite_chat()) and len(user_message.strip()) >= 30 and _engine is not None and hasattr(_engine, "auto_reason"):
             try:
                 _rc_client = self._build_client()
                 _rc_context = session.messages[-12:] if session.messages else []
@@ -2040,6 +2040,20 @@ class Agent:
             return deduped
         return s
 
+    def _is_lite_chat(self) -> bool:
+        """轻量对话模式：默认开。开启时跳过深度推理 / 多轮自校正 / 多重规划等
+        额外串行模型调用，只保留 1 次主回答调用，显著降低首字延迟。
+        关闭方式：环境变量 LUMU_LITE_CHAT=0，或在设置页关闭「轻量对话模式」。
+        """
+        env = os.getenv("LUMU_LITE_CHAT", "1").strip()
+        if env in ("0", "false", "False", "no", "off"):
+            return False
+        try:
+            from core.user_config import get_chat_config
+            return bool(get_chat_config().get("lite_mode", True))
+        except Exception:
+            return True
+
     async def stream_chat(
         self, user_message: str, session_id: str | None = None, images: list[str] | None = None, files: list[dict] | None = None, voice_mode: bool = False, space: str = "work"
     ) -> AsyncIterator[dict]:
@@ -2050,6 +2064,7 @@ class Agent:
         """
         session = self.get_or_create_session(session_id, space=space)
         self._current_space = session.space
+        lite = self._is_lite_chat()  # 轻量模式：跳过深度推理/多重规划，降低首字延迟
         # 第3层空间隔离：文件读写与终端工作目录按当前空间划分
         try:
             from tools import file_ops, terminal
@@ -2094,7 +2109,7 @@ class Agent:
             except Exception as _e:
                 _log("[reasoning] engine init failed: %s" % _e)
                 _engine = None
-        if len(user_message.strip()) >= 30 and _engine is not None and hasattr(_engine, "auto_reason"):
+        if (not self._is_lite_chat()) and len(user_message.strip()) >= 30 and _engine is not None and hasattr(_engine, "auto_reason"):
             try:
                 _rc_client = self._build_client()
                 _rc_context = session.messages[-12:] if session.messages else []
@@ -2242,67 +2257,70 @@ class Agent:
             yield {"type": "vision_warning", "content": self._last_vision_warning}
 
         # v5: Proactive planning — skip simple messages and voice mode for speed
-        try:
-            _msg_lower = user_message.strip().lower()
-            _skip = voice_mode or len(user_message.strip()) < 30 or any(
-                kw in _msg_lower for kw in [
-                    "你好", "hello", "hi", "hey", "嗨", "在吗", "在不在",
-                    "谢谢", "thanks", "感谢", "辛苦了",
-                    "再见", "bye", "拜拜",
-                    "好的", "ok", "okay", "嗯",
-                    "是的", "对的", "不是", "不对", "不行",
-                    "帮", "能", "可以", "会", "怎么", "什么", "为什么",
-                    "哪里", "吗？", "吗?", "聊聊", "聊天", "说说", "讲讲",
-                ]
-            )
-            if _skip:
-                raise Exception("skip_planning")
-            _planning_prompt = (
-                "分析以下用户请求，给出执行计划。如果是简单问题（闲聊、单步操作）返回空计划。\n\n"
-                f"用户请求: {user_message[:500]}\n\n"
-                "可用工具类型: 文件读写、终端命令、知识库搜索、网络搜索等\n\n"
-                "请用以下JSON格式回复：\n"
-                '{"needs_planning": true/false, "sub_goals": ["步骤1", "步骤2"], "suggested_tools": ["工具1"], "risks": ["风险1"]}\n\n'
-                "判断标准：\n"
-                "- 需要规划：多步骤任务、涉及多个文件、需要组合工具、复杂分析\n"
-                "- 不需要规划：简单问答、单文件读取、闲聊、感谢\n"
-            )
-            _plan_client = self._build_client()
-            _plan_resp = await _plan_client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "你是一个任务规划助手。分析用户请求并给出简洁执行计划。"},
-                    {"role": "user", "content": _planning_prompt},
-                ],
-                temperature=0.2,
-                max_tokens=300,
-            )
-            _plan_text = _plan_resp.choices[0].message.content.strip()
-            import re as _re_plan
-            import json as _json_plan
-            _json_match = _re_plan.search(r'\{.*\}', _plan_text, _re_plan.DOTALL)
-            if _json_match:
-                try:
-                    _plan = _json_plan.loads(_json_match.group())
-                    if _plan.get("needs_planning") and _plan.get("sub_goals"):
-                        _plan_msg = "📋 执行计划：\n"
-                        for _i, _g in enumerate(_plan["sub_goals"][:5], 1):
-                            _plan_msg += f"  {_i}. {_g}\n"
-                        if _plan.get("suggested_tools"):
-                            _plan_msg += f"建议工具: {', '.join(_plan['suggested_tools'][:5])}\n"
-                        if _plan.get("risks"):
-                            _plan_msg += f"注意事项: {', '.join(_plan['risks'][:3])}\n"
-                        _plan_msg += "请按此计划执行，如果某步失败则灵活调整。"
-                        messages.append({"role": "system", "content": _plan_msg})
-                        # P1③: JSON 规划器的 sub_goals 同样进入计划状态，驱动循环进度核对
-                        _active_plan_text = "\n".join(
-                            f"{_i}. {_g}" for _i, _g in enumerate(_plan["sub_goals"][:5], 1)
-                        )
-                        _log(f"[planning] Plan created: {len(_plan['sub_goals'])} goals, tools: {_plan.get('suggested_tools', [])}")
-                except Exception:
-                    pass
-        except Exception as _e:
-            _log(f"[planning] Error: {_e}")
+        if lite:
+            _log("[planning] skipped (lite mode)")
+        else:
+            try:
+                _msg_lower = user_message.strip().lower()
+                _skip = voice_mode or len(user_message.strip()) < 30 or any(
+                    kw in _msg_lower for kw in [
+                        "你好", "hello", "hi", "hey", "嗨", "在吗", "在不在",
+                        "谢谢", "thanks", "感谢", "辛苦了",
+                        "再见", "bye", "拜拜",
+                        "好的", "ok", "okay", "嗯",
+                        "是的", "对的", "不是", "不对", "不行",
+                        "帮", "能", "可以", "会", "怎么", "什么", "为什么",
+                        "哪里", "吗？", "吗?", "聊聊", "聊天", "说说", "讲讲",
+                    ]
+                )
+                if _skip:
+                    raise Exception("skip_planning")
+                _planning_prompt = (
+                    "分析以下用户请求，给出执行计划。如果是简单问题（闲聊、单步操作）返回空计划。\n\n"
+                    f"用户请求: {user_message[:500]}\n\n"
+                    "可用工具类型: 文件读写、终端命令、知识库搜索、网络搜索等\n\n"
+                    "请用以下JSON格式回复：\n"
+                    '{"needs_planning": true/false, "sub_goals": ["步骤1", "步骤2"], "suggested_tools": ["工具1"], "risks": ["风险1"]}\n\n'
+                    "判断标准：\n"
+                    "- 需要规划：多步骤任务、涉及多个文件、需要组合工具、复杂分析\n"
+                    "- 不需要规划：简单问答、单文件读取、闲聊、感谢\n"
+                )
+                _plan_client = self._build_client()
+                _plan_resp = await _plan_client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": "你是一个任务规划助手。分析用户请求并给出简洁执行计划。"},
+                        {"role": "user", "content": _planning_prompt},
+                    ],
+                    temperature=0.2,
+                    max_tokens=300,
+                )
+                _plan_text = _plan_resp.choices[0].message.content.strip()
+                import re as _re_plan
+                import json as _json_plan
+                _json_match = _re_plan.search(r'\{.*\}', _plan_text, _re_plan.DOTALL)
+                if _json_match:
+                    try:
+                        _plan = _json_plan.loads(_json_match.group())
+                        if _plan.get("needs_planning") and _plan.get("sub_goals"):
+                            _plan_msg = "📋 执行计划：\n"
+                            for _i, _g in enumerate(_plan["sub_goals"][:5], 1):
+                                _plan_msg += f"  {_i}. {_g}\n"
+                            if _plan.get("suggested_tools"):
+                                _plan_msg += f"建议工具: {', '.join(_plan['suggested_tools'][:5])}\n"
+                            if _plan.get("risks"):
+                                _plan_msg += f"注意事项: {', '.join(_plan['risks'][:3])}\n"
+                            _plan_msg += "请按此计划执行，如果某步失败则灵活调整。"
+                            messages.append({"role": "system", "content": _plan_msg})
+                            # P1③: JSON 规划器的 sub_goals 同样进入计划状态，驱动循环进度核对
+                            _active_plan_text = "\n".join(
+                                f"{_i}. {_g}" for _i, _g in enumerate(_plan["sub_goals"][:5], 1)
+                            )
+                            _log(f"[planning] Plan created: {len(_plan['sub_goals'])} goals, tools: {_plan.get('suggested_tools', [])}")
+                    except Exception:
+                        pass
+            except Exception as _e:
+                _log(f"[planning] Error: {_e}")
 
         max_iterations = self.max_iterations
         tool_results_all = []

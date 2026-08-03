@@ -14,6 +14,12 @@ _DEFAULT_CONFIG = {
     "stt": {
         "default_provider": "whisper",  # whisper (StepFun API) or google
     },
+    # 轻量对话模式：默认开启。开启后普通聊天只做 1 次模型调用（记忆召回 + RAG +
+    # 主回答），跳过深度推理 / 多轮自校正 / 多重规划等额外串行调用，显著降低首字
+    # 延迟（尤其在使用国内较慢的 OpenAI 兼容服务时）。复杂任务可在设置里关闭。
+    "chat": {
+        "lite_mode": True,
+    },
 }
 
 
@@ -215,3 +221,30 @@ def set_embedding_config(api_key: str = "", base_url: str = "", model: str = "")
     if model:
         cfg["embedding_model"] = model
     save_config(cfg)
+
+
+def get_chat_config() -> dict:
+    """Get chat behavior config (currently lite_mode)."""
+    cfg = load_config()
+    chat = cfg.get("chat", {})
+    if not isinstance(chat, dict):
+        chat = {}
+    return {
+        "lite_mode": chat.get("lite_mode", _DEFAULT_CONFIG["chat"]["lite_mode"]),
+    }
+
+
+def set_chat_config(chat_cfg: dict) -> bool:
+    """Persist chat behavior config (e.g. {"lite_mode": bool})."""
+    if not isinstance(chat_cfg, dict):
+        return False
+    cfg = load_config()
+    cur = cfg.get("chat", {})
+    if not isinstance(cur, dict):
+        cur = {}
+    for k in ("lite_mode",):
+        if k in chat_cfg:
+            cur[k] = bool(chat_cfg[k])
+    cfg["chat"] = cur
+    save_config(cfg)
+    return True
