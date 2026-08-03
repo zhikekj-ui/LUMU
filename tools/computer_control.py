@@ -38,7 +38,7 @@ def _guard(fn):
 def register(registry):
     registry.register(
         name="screenshot",
-        description="截取当前屏幕并保存，返回路径供视觉能力查看。",
+        description="截取【本机桌面屏幕】（你运行的这台电脑的真实显示器画面，不是网页）。保存为图片并交付对话，可供视觉能力查看。注意：截网页请用 browser_screenshot，本工具只截本机桌面。",
         parameters={"type": "object", "properties": {"path": {"type": "string", "description": "可选保存路径，缺省用临时文件"}}, "required": []},
         handler=_screenshot, toolset="computer", emoji="🖥️",
     )
