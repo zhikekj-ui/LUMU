@@ -3,7 +3,7 @@
 > 跑在你自己机器上的 AI 智能体。有长期记忆，会用工具，能真的把事办完。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![CI](https://github.com/zhikekj-ui/LUMU/actions/workflows/ci.yml/badge.svg)](https://github.com/zhikekj-ui/LUMU/actions/workflows/ci.yml)
 [![Website](https://img.shields.io/badge/Website-lumux.cn-7fdcff)](https://lumux.cn)
 [![GitHub stars](https://img.shields.io/github/stars/zhikekj-ui/LUMU?style=social)](https://github.com/zhikekj-ui/LUMU)

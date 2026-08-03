@@ -48,6 +48,7 @@ python-multipart>=0.0.9
 playwright==1.61.0
 
 # Desktop control — 控制电脑是 LUMU 标配能力（截屏/鼠标/键盘/窗口查询）。
-# 随分发安装，本地有桌面环境时开箱即用；无显示的服务端自动降级为清晰提示。
-pyautogui>=0.9.54
+# 随分发安装，macOS/Windows 桌面环境开箱即用；Linux 无 GUI 不需也装不上 X11 依赖，
+# 故按平台跳过 —— 代码内 _AVAILABLE 已对缺失依赖优雅降级为清晰提示，不影响服务启动。
+pyautogui>=0.9.54; sys_platform != "linux"
 Pillow>=10.0.0
