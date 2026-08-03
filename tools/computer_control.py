@@ -7,6 +7,7 @@ active-window query. Cross-platform via pyautogui.
 本地有桌面环境时开箱即用；无图形显示的服务端自动降级为清晰提示。
 """
 import os
+import sys
 import time
 import logging
 import tempfile
@@ -85,6 +86,28 @@ def register(registry):
     )
 
 
+def _capture_to(path):
+    """跨平台截图到 path。
+
+    主路 pyautogui（macOS 走 Quartz/CG，不依赖外部二进制、不依赖 PATH）；
+    macOS 额外用绝对路径 /usr/sbin/screencapture 兜底，彻底排除「PATH 缺
+    /usr/sbin 导致 [Errno 2] No such file or directory」这类环境差异。
+    """
+    # 1) pyautogui 主路（已在本机真机验证可用）
+    try:
+        img = pyautogui.screenshot()
+        img.save(path)
+        return
+    except Exception as e:
+        logging.debug("pyautogui.screenshot failed: %s", e)
+    # 2) macOS 原生兜底：绝对路径，绝不依赖 PATH
+    if sys.platform == "darwin" and os.path.exists("/usr/sbin/screencapture"):
+        import subprocess as _sp
+        _sp.run(["/usr/sbin/screencapture", "-x", "-t", "png", path], check=True)
+        return
+    raise RuntimeError("无可用的截图后端（pyautogui 与 screencapture 均不可用）")
+
+
 def _screenshot(path=None):
     if not _AVAILABLE:
         return _UNAVAILABLE
@@ -94,8 +117,7 @@ def _screenshot(path=None):
             out_dir = os.path.join(home, "artifacts", "screenshots")
             os.makedirs(out_dir, exist_ok=True)
             path = os.path.join(out_dir, "lumu_shot_%d.png" % int(time.time()))
-        img = pyautogui.screenshot()
-        img.save(path)
+        _capture_to(path)
         # 自动把产物交付给前端：对话中出现可预览/下载的卡片
         try:
             from tools.file_delivery import deliver_file
@@ -107,6 +129,8 @@ def _screenshot(path=None):
         msg = str(e)
         if "display" in msg.lower():
             hint = "\n（当前环境没有图形显示，控制电脑功能需在带桌面的本机运行。）"
+        elif "Operation not permitted" in msg or "13" in msg:
+            hint = "\n（macOS 屏幕录制/辅助功能权限被拒：请到 系统设置 → 隐私与安全性，把「启动 LUMU 的终端」加入「屏幕录制」白名单后重试。注意：若用 launchd 自启，launchd 本身不在白名单，需改为在自己终端启动 LUMU。）"
         else:
             hint = "\n（若提示权限不足：请到 系统设置 → 隐私与安全性 → 屏幕录制（及辅助功能），把启动 LUMU 的终端加入白名单后重试。）"
         return "❌ 截图失败：%s%s" % (msg, hint)
