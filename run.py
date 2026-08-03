@@ -1,6 +1,16 @@
 """Entry point - run the agent framework server."""
 import os
 import sys
+
+# Windows 编码根治：中文 Windows 默认以 gbk 解码文本文件，而 LUMU 仓库内含大量
+# UTF-8 中文（前端 index.html、工具源码注释、提示词等），gbk 解码失败会抛
+# UnicodeDecodeError 导致裸 500。强制 UTF-8 模式使所有 open()/read_text() 默认以
+# utf-8 解码（Python 官方推荐做法）。需在导入任何模块前、解释器启动早期生效，
+# 故用 os.execv 重启自身（仅 win32 且尚未开启 UTF-8 模式时执行一次）。
+if sys.platform == "win32" and os.environ.get("PYTHONUTF8") != "1":
+    os.environ["PYTHONUTF8"] = "1"
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
 import asyncio
 
 # Windows 异步事件循环策略：playwright / aiohttp 等库在默认 ProactorEventLoop

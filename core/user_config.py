@@ -21,7 +21,7 @@ def load_config() -> dict:
     """Load user config from disk, creating default if missing."""
     if CONFIG_PATH.exists():
         try:
-            with open(CONFIG_PATH) as f:
+            with open(CONFIG_PATH, encoding="utf-8") as f:
                 data = json.load(f)
             # Merge with defaults for any missing keys
             for k, v in _DEFAULT_CONFIG.items():

@@ -308,7 +308,7 @@ async def activate_access(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    html = (STATIC_DIR / "index.html").read_text()
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     return HTMLResponse(
         content=html,
         headers={

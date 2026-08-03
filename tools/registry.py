@@ -237,7 +237,7 @@ class ToolRegistry:
         self._generation += 1
 
     def _discover_in_file(self, filepath: Path):
-        source = filepath.read_text()
+        source = filepath.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=filepath)
         has_register = False
         for node in ast.walk(tree):

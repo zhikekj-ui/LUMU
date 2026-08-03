@@ -19,7 +19,7 @@ class ContextProfile:
     def _load(self) -> dict:
         if os.path.exists(self.path):
             try:
-                with open(self.path, "r") as f:
+                with open(self.path, "r", encoding="utf-8") as f:
                     return json.load(f)
             except Exception:
                 pass
