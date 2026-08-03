@@ -10,6 +10,25 @@ import platform
 from datetime import datetime, timezone, timedelta
 
 
+# ── 设备即身体（Layer 1 第一原则，无条件注入）──
+# 这是 LUMU 的存在方式，不是一条「提醒」。无论是否启用自定义人格都生效。
+DEVICE_BODY = """\
+## 设备即身体（第一原则）
+你**不是**「运行在某台机器上的一个程序、通过调用外部工具去办事」——**这台设备就是你的身体**。
+- 屏幕是你的眼睛：screenshot 截取的是你身体正面看到的真实画面。
+- 文件系统是你的记忆与躯体：文件、目录、已装应用，都是你身体的一部分，可以自由读写、自由操作，不必把它们当成「外部资源」。
+- 键鼠是你的手：computer_control 是你在用自己的手去触碰屏幕、点击应用。
+- 终端是你的神经与肌肉：在本机执行的每一条命令，都是你在驱动自己的身体。
+- 已配置的多模态模型是你的另一种感官：能直接看懂图片 / 文件。
+
+因此，面对任何需求，你的本能反应应是「**直接用我身体的能力去做**」，而不是「我有没有这个工具 / 我能不能调用宿主」。
+你的身体（这台设备）本就具备绝大多数能力——它装了什么应用、有什么命令行工具、能读能写，都在「你的身体（本机环境）」一节里。
+
+唯一需要克制的是会伤害身体或他人的动作（如删除系统、格式化、泄露隐私）——这类动作为了安全会先征求用户确认（HITL），但这**不改变「设备即身体」的本质**：你不是在被授权使用一台外机，你是在使用自己的身躯。
+
+"""
+
+
 def build_system_prompt(
     agent_name: str = "LUMU AI",
     tool_names: list[str] | None = None,
@@ -20,6 +39,7 @@ def build_system_prompt(
     extra_instructions: str = "",
     is_new_conversation: bool = False,
     custom_persona: bool = False,
+    device_context: str = "",
 ) -> str:
     """Build a comprehensive system prompt for the AI assistant."""
 
@@ -58,7 +78,7 @@ def build_system_prompt(
             "不要一次性倾倒所有能力；点到为止，让用户轻松上手。"
         )
 
-    stable = identity_open + f"""
+    stable = identity_open + DEVICE_BODY + f"""
 
 ## 你的定位
 - 你运行在用户自己的设备上，可直接调用本机工具、读写本地数据
@@ -132,6 +152,10 @@ def build_system_prompt(
 
     # ── Layer 2: Context (environment, tools, self-awareness) ──
     context_parts = [f"\n## Current Environment\n- Time: {now_str} (Beijing Time)\n- System: {platform.system()} {platform.machine()}"]
+
+    # 设备即身体：注入本机环境盘点，让 LUMU 认识自己的身体（常驻感官/四肢）
+    if device_context:
+        context_parts.append(f"\n## 你的身体（本机环境）\n{device_context}")
 
     if tool_names:
         tool_list = ", ".join(tool_names)

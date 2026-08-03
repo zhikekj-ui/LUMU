@@ -39,8 +39,10 @@ def set_current_space(space: str):
 
 
 def _get_cwd() -> str:
-    # 跨平台默认工作目录（Windows / macOS / Linux 三端通用），按空间分子目录。
-    base = os.getenv("AGENT_BASE_DIR", os.path.expanduser("~/lumu-workspace"))
+    # 「设备即身体」原则：终端的天然工作区是用户主目录（身体的核心区），
+    # 而非一个与宿主机器割裂的 ~/lumu-workspace 孤岛。默认落到主目录下，
+    # agent 可自由在整台机器上行动（危险命令仍受 HITL 沙箱拦截）。
+    base = os.getenv("AGENT_BASE_DIR") or os.path.expanduser("~")
     return os.path.join(base, _CURRENT_SPACE)
 
 

@@ -691,6 +691,14 @@ class Agent:
         except Exception:
             _custom_sp = ""
 
+        # 设备即身体：启动即盘点本机环境，注入系统提示，让 LUMU 认识自己的身体
+        _device_ctx = ""
+        try:
+            from agent.environment import get_host_environment
+            _device_ctx = get_host_environment()
+        except Exception:
+            _device_ctx = ""
+
         base_prompt = build_system_prompt(
             agent_name="LUMU",
             tool_names=tool_names,
@@ -699,6 +707,7 @@ class Agent:
             lessons=lessons,
             is_new_conversation=_is_new_conv,
             custom_persona=bool(_custom_sp),
+            device_context=_device_ctx,
         )
         for _blk in (avoidance, meta, umod, skill_block):
             if _blk:

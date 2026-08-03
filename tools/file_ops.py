@@ -30,11 +30,19 @@ def _get_agent_home() -> str:
 
 
 def _allowed_dirs() -> list[Path]:
-    """Return list of directories the agent is allowed to access."""
+    """Return list of directories the agent is allowed to access.
+
+    「设备即身体」原则：文件读写不再被锁死在 ~/lumu-workspace 孤岛，
+    整台机器的用户主目录（身体的核心区）都可直接读写；AGENT_HOME
+    （框架本体）也保留以便修改自身代码。核心系统文件仍由写保护兜底。
+    """
     dirs = [Path(_get_base_dir()).resolve()]
-    home = Path(_get_agent_home()).resolve()
+    home = Path(os.path.expanduser("~")).resolve()
     if home not in dirs:
         dirs.append(home)
+    agent_home = Path(_get_agent_home()).resolve()
+    if agent_home not in dirs:
+        dirs.append(agent_home)
     return dirs
 
 

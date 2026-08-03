@@ -1126,6 +1126,16 @@ async def favicon_ico():
     raise HTTPException(status_code=404)
 
 
+@app.get("/favicon.png", include_in_schema=False)
+async def favicon_png():
+    """浏览器标签页图标（PNG 版，当前为 LUMU 品牌图）。"""
+    from fastapi.responses import FileResponse
+    p = STATIC_DIR / "favicon.png"
+    if p.exists():
+        return FileResponse(str(p), media_type="image/png")
+    raise HTTPException(status_code=404)
+
+
 # --- User Config (Provider API Keys + TTS/STT) ---
 from providers.registry import list_providers
 
