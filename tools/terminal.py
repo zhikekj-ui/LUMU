@@ -46,6 +46,13 @@ def _get_cwd() -> str:
 
 async def run_terminal(command: str, timeout: int = 30) -> str:
     """Execute command asynchronously using asyncio subprocess."""
+    # 确保工作目录存在：否则 cwd 缺失会让整个命令抛 FileNotFoundError 而失败
+    # （这正是「终端基础文件操作都执行失败」的根因，必须自愈而非崩溃）
+    cwd = _get_cwd()
+    try:
+        os.makedirs(cwd, exist_ok=True)
+    except Exception:
+        pass
     # ── 安全沙箱：硬拦截危险命令 + 白名单策略（defense in depth）──
     try:
         from agent.security import get_command_sandbox
@@ -60,7 +67,7 @@ async def run_terminal(command: str, timeout: int = 30) -> str:
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=_get_cwd(),
+            cwd=cwd,
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
