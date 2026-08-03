@@ -1116,30 +1116,6 @@ async def favicon_svg():
     raise HTTPException(status_code=404)
 
 
-# 品牌图标静态资源（favicon/manifest/og-image 等），HTML 引用为根路径 /<filename>
-# 保持与 /favicon.svg 同样的根路径风格：StaticFiles 只挂在 /static，所以这些单独写
-_BRAND_ICON_FILES = [
-    ("/favicon-16.png",  "favicon-16.png",   "image/png"),
-    ("/favicon-32.png",  "favicon-32.png",   "image/png"),
-    ("/apple-touch-180.png", "apple-touch-180.png", "image/png"),
-    ("/icon-192.png",    "icon-192.png",     "image/png"),
-    ("/icon-512.png",    "icon-512.png",     "image/png"),
-    ("/og-image.png",    "og-image.png",     "image/png"),
-    ("/site.webmanifest", "site.webmanifest", "application/manifest+json"),
-]
-for _route_path, _file_name, _media in _BRAND_ICON_FILES:
-    # 闭包捕获避免循环变量陷阱
-    _fp = STATIC_DIR / _file_name
-    _mt = _media
-    async def _brand_icon_handler(__fp=_fp, __mt=_mt):
-        from fastapi.responses import FileResponse
-        if __fp.exists():
-            return FileResponse(str(__fp), media_type=__mt)
-        raise HTTPException(status_code=404)
-    _brand_icon_handler.__name__ = f"brand_icon_{_file_name.replace('.', '_').replace('-', '_')}"
-    app.add_api_route(_route_path, _brand_icon_handler, include_in_schema=False, methods=["GET"])
-
-
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon_ico():
     """兼容旧浏览器默认请求 /favicon.ico。"""
