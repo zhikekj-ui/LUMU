@@ -6,6 +6,7 @@
 # 运行时数据（含 API Key 与全部对话，绝不入库）
 data/
 logs/
+artifacts/
 *.db
 *.db-wal
 *.db-shm
