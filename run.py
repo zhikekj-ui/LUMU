@@ -20,6 +20,11 @@ if __name__ == "__main__":
             "macOS 提示：使用「截取桌面屏幕」功能前，请到 系统设置 → 隐私与安全性 → 屏幕录制，"
             "授权启动本程序的终端（Terminal/iTerm），并重启该终端后重新运行。否则截图会提示权限不足。"
         )
+    elif sys.platform == "win32":
+        logger.info(
+            "Windows 提示：使用「截取桌面屏幕」功能前，请到 设置 → 隐私和安全性 → 屏幕截图，"
+            "打开「允许应用访问你的屏幕」。否则截图可能得到黑屏。"
+        )
     logger.info("Starting Agent Framework", host=HOST, port=PORT)
     try:
         from core.access_guard import startup_banner
