@@ -46,3 +46,8 @@ python-multipart>=0.0.9
 # Browser automation (Playwright — 浏览器工具核心依赖；Docker 镜像内一并安装 Chromium)
 # 版本与开发/演示服务器对齐（1.61.0），保证干净安装也能获得浏览器能力。
 playwright==1.61.0
+
+# Desktop control — 控制电脑是 LUMU 标配能力（截屏/鼠标/键盘/窗口查询）。
+# 随分发安装，本地有桌面环境时开箱即用；无显示的服务端自动降级为清晰提示。
+pyautogui>=0.9.54
+Pillow>=10.0.0
