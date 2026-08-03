@@ -684,6 +684,13 @@ class Agent:
         else:
             _is_new_conv = True
 
+        # 用户自定义 system_prompt（user_config.json）——每次消息都从磁盘重读，无需重启
+        _custom_sp = ""
+        try:
+            _custom_sp = get_system_prompt() or ""
+        except Exception:
+            _custom_sp = ""
+
         base_prompt = build_system_prompt(
             agent_name="LUMU",
             tool_names=tool_names,
@@ -691,12 +698,13 @@ class Agent:
             context_profile=context_profile,
             lessons=lessons,
             is_new_conversation=_is_new_conv,
+            custom_persona=bool(_custom_sp),
         )
         for _blk in (avoidance, meta, umod, skill_block):
             if _blk:
                 base_prompt = base_prompt + "\n\n" + _blk
         try:
-            _custom = get_system_prompt()
+            _custom = _custom_sp
             # 运行时注入当前底层模型身份：确保 LUMU 永远知道自己此刻真实跑在哪个模型上，
             # 被问“你是什么模型”时直接回答，不再去瞎猜/调用接口/说“查不到”。
             try:
