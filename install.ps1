@@ -21,25 +21,46 @@ try {
 $LUMU_DIR = if ($env:LUMU_DIR) { $env:LUMU_DIR } else { Join-Path $HOME "LUMU" }
 $DL = "https://lumux.cn/downloads/lumu-latest.zip"
 
-function Test-Py {
+# ---- Resolve real python (avoid Microsoft Store alias) ----
+function Resolve-Py {
+  # Prefer Python Launcher (py.exe) — always real python on Windows
+  if (Get-Command py -ErrorAction SilentlyContinue) { return "py -3" }
+  $c = Get-Command python -ErrorAction SilentlyContinue
+  if ($c) {
+    $src = $c.Source
+    if ($src -like "*WindowsApps*") {
+      Write-Host "ERROR: 'python' is the Microsoft Store ALIAS, not real Python." -ForegroundColor Red
+      Write-Host "Fix: Settings > Apps > Advanced app settings > App execution aliases" -ForegroundColor Yellow
+      Write-Host "      Turn OFF 'python.exe' and 'python3.exe', then:" -ForegroundColor Yellow
+      Write-Host "      Install Python 3.11+ from https://www.python.org/downloads/ (check 'Add to PATH')." -ForegroundColor Yellow
+      exit 1
+    }
+    return "python"
+  }
+  Write-Host "ERROR: python not found in PATH." -ForegroundColor Red
+  Write-Host "Install Python 3.11+ from https://www.python.org/downloads/ (check 'Add to PATH')." -ForegroundColor Yellow
+  exit 1
+}
+
+function Test-Py($pyCmd) {
   Write-Host "[1/5] Checking Python..."
-  $p = Get-Command python -ErrorAction SilentlyContinue
-  if (-not $p) {
-    Write-Host "ERROR: python not found in PATH." -ForegroundColor Red
-    Write-Host "Please install Python 3.11+ from https://www.python.org/downloads/ and check 'Add to PATH'."
-    exit 1
-  }
   try {
-    $v = (python -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null).Trim()
+    $raw = (& $pyCmd --version 2>&1).ToString().Trim()
+    if ($raw -match '(\d+)\.(\d+)') {
+      $v = "$($Matches[1]).$($Matches[2])"
+    } else {
+      throw "cannot parse version from: $raw"
+    }
   } catch {
-    Write-Host "ERROR: python execution failed." -ForegroundColor Red
+    Write-Host "ERROR: python execution failed: $_" -ForegroundColor Red
+    Write-Host "If you just disabled the Store alias, please RESTART PowerShell first." -ForegroundColor Yellow
     exit 1
   }
-  if (-not $v -or $v -notmatch '^\d+\.\d+$' -or [version]$v -lt [version]"3.11") {
+  if ([version]$v -lt [version]"3.11") {
     Write-Host "ERROR: Python version too low ($v), need 3.11+" -ForegroundColor Red
     exit 1
   }
-  Write-Host "OK: Python $v" -ForegroundColor Green
+  Write-Host "OK: Python $v ($pyCmd)" -ForegroundColor Green
 }
 
 function Get-Zip {
@@ -93,7 +114,8 @@ Write-Host "  LUMU Installer (Windows)"
 Write-Host "============================================"
 Write-Host ""
 
-Test-Py
+$pyCmd = Resolve-Py
+Test-Py $pyCmd
 
 if ($isUpdate -and (Test-Path (Join-Path $LUMU_DIR "run.py"))) {
   $z = Get-Zip
@@ -111,7 +133,7 @@ if ($isUpdate -and (Test-Path (Join-Path $LUMU_DIR "run.py"))) {
 if (-not (Test-Path (Join-Path $LUMU_DIR ".venv"))) {
   Write-Host "[4/5] Creating virtual environment..."
   try {
-    python -m venv (Join-Path $LUMU_DIR ".venv") -ErrorAction Stop
+    & $pyCmd -m venv (Join-Path $LUMU_DIR ".venv") -ErrorAction Stop
   } catch {
     Write-Host "ERROR: venv creation failed: $_" -ForegroundColor Red
     exit 1
@@ -122,9 +144,7 @@ try {
   & (Join-Path $LUMU_DIR ".venv\Scripts\python.exe") -m pip install -r (Join-Path $LUMU_DIR "requirements.txt") -ErrorAction Stop
 } catch {
   Write-Host "ERROR: pip install failed: $_" -ForegroundColor Red
-  Write-Host "Try running manually:" -ForegroundColor Yellow
-  Write-Host "  cd $LUMU_DIR"
-  Write-Host "  .venv\Scripts\pip install -r requirements.txt"
+  Write-Host "Try manually: cd $LUMU_DIR ; .venv\Scripts\pip install -r requirements.txt" -ForegroundColor Yellow
   exit 1
 }
 
