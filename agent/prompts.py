@@ -107,16 +107,24 @@ def build_system_prompt(
         tool_list = ", ".join(tool_names)
         context_parts.append(f"- Available tools: {tool_list}")
 
-    agent_home = os.getenv("AGENT_HOME", "")
-    if agent_home:
-        context_parts.append(f"""
+    # 始终解析项目根目录：普通用户直接 `python run.py` 不会设 AGENT_HOME，
+    # 这里必须自我兜底，绝不能因环境变量缺失而静默退化整段自我认知。
+    agent_home = os.getenv("AGENT_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # 重启指令随平台自适应：systemctl 仅适用于 Linux 服务部署；
+    # 本机（Mac/Win）用户应直接重启 python 进程，不应被告知 systemctl。
+    if platform.system() == "Linux":
+        restart_hint = "修改代码后用 `systemctl restart lumu-agent` 重启服务"
+    else:
+        restart_hint = "修改代码后请停止当前进程并重新运行 `python run.py`"
+
+    context_parts.append(f"""
 ## Self-Awareness
-- Your code is deployed at {agent_home}
-- You can read and modify your own code files (tools/, agent/, api/, config.py etc.)
-- After modifying code, restart the service with `systemctl restart agent-framework`
-- You can install new dependencies (pip install), add new tools, modify your own prompt
-- Be cautious when modifying your own code — ensure correctness
-- 若运行环境带图形界面，你有控制电脑能力：screenshot 工具截取的是**用户正在看的真实桌面屏幕**（不是网页）；用户说「截屏 / 截桌面」时调用 screenshot，不要调用 browser_screenshot（后者只截网页）""")
+- 你的代码部署在 {agent_home}
+- 你可以读取并修改自己的代码文件（tools/、agent/、api/、config.py 等）
+- {restart_hint}
+- 你可以安装新依赖（pip install）、新增工具、调整自己的提示词
+- 修改自身代码时务必保证正确，先小范围验证再扩大影响""")
 
     context_section = "\n".join(context_parts)
 

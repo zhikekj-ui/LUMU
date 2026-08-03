@@ -86,6 +86,23 @@ def register(registry):
     )
 
 
+class _ScreenPermissionError(RuntimeError):
+    """macOS 屏幕录制未授权的明确信号，供上层给出精准指引。"""
+
+
+def _is_blank_png(path):
+    """极简判断：截图是否接近纯色（macOS 屏幕录制未授权时常产出纯黑/纯白空白图）。"""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            im = im.convert("RGB")
+            extrema = im.getextrema()
+            # 三通道极差都很小 => 接近纯色（大概率权限被拒的空白屏）
+            return all((hi - lo) < 10 for (lo, hi) in extrema)
+    except Exception:
+        return False
+
+
 def _capture_to(path):
     """跨平台截图到 path。
 
@@ -93,19 +110,39 @@ def _capture_to(path):
     macOS 额外用绝对路径 /usr/sbin/screencapture 兜底，彻底排除「PATH 缺
     /usr/sbin 导致 [Errno 2] No such file or directory」这类环境差异。
     """
+    errors = []
+
     # 1) pyautogui 主路（已在本机真机验证可用）
     try:
         img = pyautogui.screenshot()
-        img.save(path)
-        return
+        if img is None:
+            errors.append("pyautogui.screenshot() 返回空")
+        else:
+            img.save(path)
+            if _is_blank_png(path):
+                raise _ScreenPermissionError("pyautogui 截到纯色空白图（macOS 屏幕录制未授权）")
+            return
+    except _ScreenPermissionError:
+        raise
     except Exception as e:
-        logging.debug("pyautogui.screenshot failed: %s", e)
+        errors.append("pyautogui: %s" % e)
+
     # 2) macOS 原生兜底：绝对路径，绝不依赖 PATH
     if sys.platform == "darwin" and os.path.exists("/usr/sbin/screencapture"):
         import subprocess as _sp
-        _sp.run(["/usr/sbin/screencapture", "-x", "-t", "png", path], check=True)
-        return
-    raise RuntimeError("无可用的截图后端（pyautogui 与 screencapture 均不可用）")
+        try:
+            _sp.run(["/usr/sbin/screencapture", "-x", "-t", "png", path], check=True)
+            if _is_blank_png(path):
+                raise _ScreenPermissionError("screencapture 截到纯色空白图（macOS 屏幕录制未授权）")
+            return
+        except _ScreenPermissionError:
+            raise
+        except _sp.CalledProcessError as e:
+            raise _ScreenPermissionError("screencapture 被系统拒绝（退出码 %s，macOS 屏幕录制未授权）" % e.returncode)
+        except Exception as e:
+            errors.append("screencapture: %s" % e)
+
+    raise RuntimeError("无可用的截图后端（%s）" % "; ".join(errors))
 
 
 def _screenshot(path=None):
@@ -127,12 +164,16 @@ def _screenshot(path=None):
         return "✅ 截图已完成并发送到对话：%s" % path
     except Exception as e:
         msg = str(e)
-        if "display" in msg.lower():
+        if isinstance(e, _ScreenPermissionError) or any(k in msg for k in ("屏幕录制", "Screen Recording", "TCC", "Operation not permitted", "non-zero exit status")):
+            hint = ("\n\n🔒 macOS 屏幕录制权限未授权，无法截取桌面：\n"
+                    "1. 打开 系统设置 → 隐私与安全性 → 屏幕录制\n"
+                    "2. 在右侧列表找到「启动 LUMU 的那个终端」（Terminal.app 或 iTerm），勾选启用\n"
+                    "3. 完全退出该终端再重新打开，然后重新运行 `python run.py`\n"
+                    "（注意：用 launchd / 后台自启的进程不在白名单内，必须从你授权过的终端前台启动 LUMU）")
+        elif "display" in msg.lower():
             hint = "\n（当前环境没有图形显示，控制电脑功能需在带桌面的本机运行。）"
-        elif "Operation not permitted" in msg or "13" in msg:
-            hint = "\n（macOS 屏幕录制/辅助功能权限被拒：请到 系统设置 → 隐私与安全性，把「启动 LUMU 的终端」加入「屏幕录制」白名单后重试。注意：若用 launchd 自启，launchd 本身不在白名单，需改为在自己终端启动 LUMU。）"
         else:
-            hint = "\n（若提示权限不足：请到 系统设置 → 隐私与安全性 → 屏幕录制（及辅助功能），把启动 LUMU 的终端加入白名单后重试。）"
+            hint = "\n（截图失败，请检查系统权限或重试。）"
         return "❌ 截图失败：%s%s" % (msg, hint)
 
 
