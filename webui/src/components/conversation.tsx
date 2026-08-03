@@ -358,6 +358,19 @@ export function Conversation() {
   const [copiedId, setCopiedId] = React.useState<string>("")
   const scrollRef = React.useRef<HTMLDivElement>(null)
   const textRef = React.useRef<HTMLTextAreaElement>(null)
+  // 开箱引导：检测是否已配置模型 Key，未配置则在空对话给出醒目提示（避免新用户误以为装坏）
+  const [modelReady, setModelReady] = React.useState<boolean | null>(null)
+  React.useEffect(() => {
+    let alive = true
+    fetch("/api/config/providers")
+      .then((r) => r.json())
+      .then((d: any) => {
+        const ps = (d && d.providers) || []
+        if (alive) setModelReady(ps.some((p: any) => p.api_key_configured))
+      })
+      .catch(() => alive && setModelReady(null))
+    return () => { alive = false }
+  }, [])
 
   // —— 附件上传：待发送队列 + 拖拽态 + 超限提示 ——
   const [attachments, setAttachments] = React.useState<PendingAttach[]>([])
@@ -923,6 +936,14 @@ export function Conversation() {
             <p className="term-welcome-title">LUMU Terminal — 本地智能体控制台</p>
             <p>输入指令开始工作。支持拖拽 / 粘贴文件、语音输入。</p>
             <p className="term-welcome-hint">› 在下方输入框键入指令，Enter 发送</p>
+          </div>
+        )}
+        {modelReady === false && (active?.messages?.length ?? 0) === 0 && (
+          <div className="term-setup-tip">
+            <span className="term-setup-icon">⚠</span>
+            <span>
+              尚未配置模型：请先到左侧 <b>设置 → 模型</b> 填入一个模型 Key（任何 OpenAI 兼容接口均可），即可开始对话。
+            </span>
           </div>
         )}
         {messages.map((m) => {
